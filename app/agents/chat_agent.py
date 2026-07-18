@@ -1,5 +1,6 @@
 from app.providers.base_provider import BaseProvider
 from app.memory.base_memory import BaseMemory
+from app.tools.tool_manager import ToolManager
 
 
 class ChatAgent:
@@ -22,9 +23,11 @@ class ChatAgent:
         self,
         provider: BaseProvider,
         memory: BaseMemory,
+        tool_manager: ToolManager,
     ):
         self.provider = provider
         self.memory = memory
+        self.tool_manager = tool_manager
 
     def chat(self, prompt: str) -> str:
         # Save user message
