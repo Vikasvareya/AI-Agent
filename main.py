@@ -4,6 +4,7 @@ from app.factories.provider_factory import ProviderFactory
 from app.memory.conversation_memory import ConversationMemory
 from app.tools.tool_manager import ToolManager
 from app.tools.calculator_tool import CalculatorTool
+from app.planner.tool_planner import ToolPlanner
 
 
 
@@ -15,12 +16,14 @@ def main():
     tool_manager.register(
     CalculatorTool()
      )
+    planner = ToolPlanner()
 
     # Inject the provider into the agent
     agent = ChatAgent(
         provider=provider,
         memory=memory,
         tool_manager=tool_manager,
+        planner=planner,
     )
 
     print("=" * 50)
