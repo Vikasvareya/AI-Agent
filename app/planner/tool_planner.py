@@ -1,6 +1,8 @@
 import re
 
 from app.planner.base_planner import BasePlanner
+from app.models.plan import Plan
+from app.enums.action_type import ActionType
 
 
 class ToolPlanner(BasePlanner):
@@ -21,14 +23,28 @@ class ToolPlanner(BasePlanner):
             r"[0-9+\-*/(). ]+",
             expression,
         ):
-            return {
-                "action": "tool",
-                "tool": "calculator",
-                "args": {
-                    "expression": expression,
-                },
-            }
+            return Plan(
+            action=ActionType.TOOL,
+            tool="calculator",
+            args={
+                "expression": expression,
+            },
+        )
 
-        return {
-            "action": "chat",
-        }
+        time_keywords = (
+            "today",
+            "current date",
+            "current time",
+            "time",
+            "date",
+        )
+
+        if any(keyword in prompt.lower() for keyword in time_keywords):
+            return Plan(
+                action=ActionType.TOOL,
+                tool="time",
+            )
+            
+        return Plan(
+            action=ActionType.CHAT,
+        )

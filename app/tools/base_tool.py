@@ -6,22 +6,29 @@ class BaseTool(ABC):
     Base class for all AI tools.
     """
 
-    # Unique tool name
-    name: str
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """
+        Unique tool name.
+        """
+        pass
 
-    # Description shown to the LLM
-    description: str
+    @property
+    @abstractmethod
+    def description(self) -> str:
+        """
+        Human-readable description of the tool.
+        """
+        pass
 
     @abstractmethod
-    def run(
-        self,
-        args: dict,
-    ) -> str:
+    def execute(self, **kwargs) -> str:
         """
         Execute the tool.
 
         Args:
-            args: Tool arguments.
+            **kwargs: Tool-specific arguments.
 
         Returns:
             Tool result as a string.

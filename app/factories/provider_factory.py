@@ -1,20 +1,20 @@
-from app.config.settings import settings
+from app.config.app_settings import AppSettings
 from app.providers.ollama_provider import OllamaProvider
 
 
 class ProviderFactory:
     """
-    Creates the correct AI provider
-    based on application configuration.
+    Factory responsible for creating AI providers.
     """
 
-    @staticmethod
-    def create():
-        provider = settings.AI_PROVIDER.lower()
+    def __init__(self, settings: AppSettings):
+        self.settings = settings
 
-        if provider == "ollama":
-            return OllamaProvider()
+    def create(self):
+        """
+        Create the configured provider.
+        """
 
-        raise ValueError(
-            f"Unsupported provider: {provider}"
-        )
+        provider_settings = self.settings.provider
+
+        return OllamaProvider(provider_settings)

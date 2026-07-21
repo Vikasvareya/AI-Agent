@@ -48,4 +48,4 @@ class ToolManager:
         if tool is None:
             return f"Tool '{name}' not found."
 
-        return tool.run(args)
+        return tool.execute(**args)

@@ -6,22 +6,26 @@ class CalculatorTool(BaseTool):
     Tool for evaluating simple mathematical expressions.
     """
 
-    name = "calculator"
+    @property
+    def name(self) -> str:
+        return "calculator"
 
-    description = (
-        "Evaluate mathematical expressions like "
-        "'2 + 2' or '10 * 5'."
-    )
+    @property
+    def description(self) -> str:
+        return (
+            "Evaluate mathematical expressions like "
+            "'2 + 2' or '10 * 5'."
+        )
 
-    def run(
+    def execute(
         self,
-        args: dict,
+        **kwargs,
     ) -> str:
         """
         Execute the calculator tool.
         """
 
-        expression = args.get("expression")
+        expression = kwargs.get("expression")
 
         if not expression:
             return "No expression provided."

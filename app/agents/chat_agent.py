@@ -2,6 +2,7 @@ from app.providers.base_provider import BaseProvider
 from app.memory.base_memory import BaseMemory
 from app.tools.tool_manager import ToolManager
 from app.planner.base_planner import BasePlanner
+from app.enums.action_type import ActionType
 
 
 class ChatAgent:
@@ -32,11 +33,11 @@ class ChatAgent:
         # Decide what to do
         plan = self.planner.plan(prompt)
 
-        if plan["action"] == "tool":
+        if plan.action is ActionType.TOOL:
 
             response = self.tool_manager.execute(
-                plan["tool"],
-                plan["args"],
+                plan.tool,
+                plan.args,
             )
 
         else:

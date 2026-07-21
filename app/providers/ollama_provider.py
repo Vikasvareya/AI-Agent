@@ -1,5 +1,5 @@
 from ollama import chat, ResponseError
-from app.config.settings import settings
+from app.config.providers.ollama_settings import OllamaSettings
 from app.providers.base_provider import BaseProvider
 from app.utils.logger import logger
 
@@ -9,8 +9,17 @@ class OllamaProvider(BaseProvider):
     Ollama implementation of BaseProvider.
     """
 
-    def __init__(self, model: str | None = None):
-        self.model = model or settings.OLLAMA_MODEL
+    def __init__(self, settings: OllamaSettings):
+
+        """
+        Initialize the Ollama provider.
+
+        Args:
+            settings: Ollama configuration.
+        """
+
+        self.settings = settings
+        self.model = settings.model
 
         logger.info(
             f"Ollama Provider initialized with model {self.model}"

@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-
+from app.models.plan import Plan
 
 class BasePlanner(ABC):
     """
@@ -11,11 +11,11 @@ class BasePlanner(ABC):
     def plan(
         self,
         prompt: str,
-    ) -> dict:
+    ) -> Plan:
         """
         Decide the next action.
 
         Returns:
-            A dictionary describing the action.
+            A Plan object describing the next action.
         """
         pass
