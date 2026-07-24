@@ -1,50 +1,43 @@
-import re
-
-from app.planner.base_planner import BasePlanner
-from app.models.plan import Plan
 from app.enums.action_type import ActionType
+from app.models.plan import Plan
+from app.planner.base_planner import BasePlanner
+from app.planner.intents.registry import IntentRegistry
 
 
 class ToolPlanner(BasePlanner):
     """
-    Simple planner.
-
-    Detects mathematical expressions.
+    Planner responsible for selecting
+    the appropriate intent.
     """
+
+    def __init__(
+        self,
+        registry: IntentRegistry,
+    ):
+        self.registry = registry
 
     def plan(
         self,
         prompt: str,
-    ) -> dict:
+    ) -> Plan:
+        """
+        Determine the next action.
+        """
 
-        expression = prompt.strip()
-
-        if re.fullmatch(
-            r"[0-9+\-*/(). ]+",
-            expression,
-        ):
-            return Plan(
-            action=ActionType.TOOL,
-            tool="calculator",
-            args={
-                "expression": expression,
-            },
+        intent = self.registry.get_matching_intent(
+            prompt,
         )
 
-        time_keywords = (
-            "today",
-            "current date",
-            "current time",
-            "time",
-            "date",
-        )
+        if intent:
+            print(f"[Planner] Selected: {intent.__class__.__name__}")
+        else:
+            print("[Planner] No intent selected. Falling back to CHAT.")
 
-        if any(keyword in prompt.lower() for keyword in time_keywords):
-            return Plan(
-                action=ActionType.TOOL,
-                tool="time",
+        if intent:
+            return intent.create_plan(
+                prompt,
             )
-            
+
         return Plan(
             action=ActionType.CHAT,
         )

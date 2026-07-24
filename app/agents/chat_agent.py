@@ -1,8 +1,7 @@
-from app.providers.base_provider import BaseProvider
 from app.memory.base_memory import BaseMemory
-from app.tools.tool_manager import ToolManager
 from app.planner.base_planner import BasePlanner
-from app.enums.action_type import ActionType
+from app.executor.base_executor import BaseExecutor
+
 
 
 class ChatAgent:
@@ -15,40 +14,43 @@ class ChatAgent:
 
     def __init__(
         self,
-        provider: BaseProvider,
         memory: BaseMemory,
         planner: BasePlanner,
-        tool_manager: ToolManager,
+        executor: BaseExecutor,
     ):
-        self.provider = provider
         self.memory = memory
-        self.tool_manager = tool_manager
         self.planner = planner
+        self.executor = executor
         
 
-    def chat(self, prompt: str) -> str:
+    def chat(
+        self,
+        prompt: str,
+    ) -> str:
+        """
+        Process a user message.
+        """
+
         # Save user message
-        self.memory.save("user", prompt)
+        self.memory.save(
+            "user",
+            prompt,
+        )
 
-        # Decide what to do
-        plan = self.planner.plan(prompt)
+        # Create execution plan
+        plan = self.planner.plan(
+            prompt,
+        )
 
-        if plan.action is ActionType.TOOL:
+        # Execute plan
+        response = self.executor.execute(
+            plan,
+        )
 
-            response = self.tool_manager.execute(
-                plan.tool,
-                plan.args,
-            )
-
-        else:
-
-            # Load conversation
-            messages = self.memory.load(limit=20)
-
-            # Ask AI
-            response = self.provider.ask(messages)
-
-        # Save assistant response
-        self.memory.save("assistant", response)
+        # Save response
+        self.memory.save(
+            "assistant",
+            response,
+        )
 
         return response
