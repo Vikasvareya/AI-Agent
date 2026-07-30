@@ -1,7 +1,7 @@
 from app.memory.base_memory import BaseMemory
 from app.planner.base_planner import BasePlanner
 from app.executor.base_executor import BaseExecutor
-
+from app.context.base_context_resolver import BaseContextResolver
 
 
 class ChatAgent:
@@ -17,10 +17,12 @@ class ChatAgent:
         memory: BaseMemory,
         planner: BasePlanner,
         executor: BaseExecutor,
+        context_resolver: BaseContextResolver,
     ):
         self.memory = memory
         self.planner = planner
         self.executor = executor
+        self.context_resolver = context_resolver
         
 
     def chat(
@@ -38,8 +40,12 @@ class ChatAgent:
         )
 
         # Create execution plan
-        plan = self.planner.plan(
+        resolved_prompt = self.context_resolver.resolve(
             prompt,
+        )
+
+        plan = self.planner.plan(
+            resolved_prompt,
         )
 
         # Execute plan

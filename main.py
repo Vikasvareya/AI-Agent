@@ -15,6 +15,7 @@ from app.executor.action_registry import ActionRegistry
 from app.executor.handlers.tool_handler import ToolHandler
 from app.executor.handlers.chat_handler import ChatHandler
 from app.enums.action_type import ActionType
+from app.context.context_resolver import ContextResolver
 
 
 def main():
@@ -65,11 +66,14 @@ def main():
         action_registry,
     )
 
+    context_resolver = ContextResolver()
+
     # Inject the provider into the agent
     agent = ChatAgent(
         memory=memory,
         planner=planner,
         executor=executor,
+        context_resolver=context_resolver,
     )
 
     print("=" * 50)

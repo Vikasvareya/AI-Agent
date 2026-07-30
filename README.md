@@ -132,6 +132,13 @@ Handler
  ↓
 Tool / LLM
 ```
+## Context Resolution
+
+Current capabilities:
+
+- Entity extraction
+- Pronoun resolution
+- Multi-turn conversation context
 
 ## 🛣 Roadmap
 
