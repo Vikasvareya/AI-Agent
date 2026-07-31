@@ -1,21 +1,19 @@
 from abc import ABC, abstractmethod
 
 from app.models.plan import Plan
-from app.planner.models import IntentMatch
 
 
-class BaseIntent(ABC):
-
-    @abstractmethod
-    def matches(
-        self,
-        prompt: str,
-    ) -> IntentMatch:
-        pass
+class BasePlanner(ABC):
+    """
+    Base class for all planners.
+    """
 
     @abstractmethod
-    def create_plan(
+    def plan(
         self,
         prompt: str,
     ) -> Plan:
+        """
+        Generate an execution plan for the given prompt.
+        """
         pass

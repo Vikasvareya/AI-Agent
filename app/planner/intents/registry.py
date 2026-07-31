@@ -5,7 +5,8 @@ from app.planner.intents.time_intent import TimeIntent
 
 class IntentRegistry:
     """
-    Stores all registered intents.
+    Maintains all registered intents and selects
+    the highest-ranked intent for a given prompt.
     """
 
     def __init__(self):

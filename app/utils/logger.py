@@ -1,9 +1,14 @@
 import logging
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
+def get_logger(name: str) -> logging.Logger:
+    """
+    Return a configured logger.
+    """
 
-logger = logging.getLogger("AIFramework")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
+
+    return logging.getLogger(name)
