@@ -3,6 +3,7 @@ import re
 from app.enums.action_type import ActionType
 from app.models.plan import Plan
 from app.planner.intents.base_intent import BaseIntent
+from app.planner.models import IntentMatch
 
 
 class MathIntent(BaseIntent):
@@ -13,7 +14,7 @@ class MathIntent(BaseIntent):
     def matches(
         self,
         prompt: str,
-    ) -> bool:
+    ) -> IntentMatch:
         """
         Determine whether the prompt contains
         a mathematical expression.
@@ -21,17 +22,24 @@ class MathIntent(BaseIntent):
 
         prompt = prompt.lower().strip()
 
+        matched = False
+
         if re.fullmatch(
             r"[0-9+\-*/(). ]+",
             prompt,
         ):
-            return True
+            matched = True
 
-        return bool(
-            re.search(
-                r"\d+\s*[\+\-\*/]\s*\d+",
-                prompt,
-            )
+        elif re.search(
+            r"\d+\s*[\+\-\*/]\s*\d+",
+            prompt,
+        ):
+            matched = True
+
+        return IntentMatch(
+            matched=matched,
+            confidence=0.95 if matched else 0.0,
+            priority=100,
         )
 
     def create_plan(

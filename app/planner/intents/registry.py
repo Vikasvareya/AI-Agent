@@ -32,16 +32,50 @@ class IntentRegistry:
         prompt: str,
     ) -> BaseIntent | None:
         """
-        Return the first matching intent.
+        Return the highest-ranked matching intent.
         """
+
+        candidates: list[tuple[BaseIntent, float, int]] = []
 
         for intent in self._intents:
 
             print(f"[Registry] Checking {intent.__class__.__name__}")
 
-            if intent.matches(prompt):
-                print(f"[Registry] Matched {intent.__class__.__name__}")
-                return intent
+            match = intent.matches(prompt)
 
-        print("[Registry] No Intent Matched")
-        return None
+            if match.matched:
+
+                print(
+                    f"[Registry] Matched {intent.__class__.__name__} "
+                    f"(priority={match.priority}, confidence={match.confidence})"
+                )
+
+                candidates.append(
+                    (
+                        intent,
+                        match.confidence,
+                        match.priority,
+                    )
+                )
+
+        if not candidates:
+
+            print("[Registry] No Intent Matched")
+
+            return None
+
+        candidates.sort(
+            key=lambda item: (
+                item[2],  # priority
+                item[1],  # confidence
+            ),
+            reverse=True,
+        )
+
+        winner = candidates[0][0]
+
+        print(
+            f"[Registry] Selected {winner.__class__.__name__}"
+        )
+
+        return winner

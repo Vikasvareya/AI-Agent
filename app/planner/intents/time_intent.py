@@ -1,48 +1,43 @@
 from app.enums.action_type import ActionType
 from app.models.plan import Plan
 from app.planner.intents.base_intent import BaseIntent
+from app.planner.models import IntentMatch
 
 
 class TimeIntent(BaseIntent):
     """
-    Detects requests related to date and time.
+    Detects time-related queries.
     """
-
-    KEYWORDS = (
-        "time",
-        "date",
-        "today",
-        "day",
-        "month",
-        "year",
-        "weekday",
-        "current time",
-        "current date",
-    )
 
     def matches(
         self,
         prompt: str,
-    ) -> bool:
-        """
-        Determine whether the prompt is asking
-        about the current date or time.
-        """
+    ) -> IntentMatch:
 
         prompt = prompt.lower()
 
-        return any(
+        keywords = (
+            "time",
+            "clock",
+            "current time",
+            "what time",
+        )
+
+        matched = any(
             keyword in prompt
-            for keyword in self.KEYWORDS
+            for keyword in keywords
+        )
+
+        return IntentMatch(
+            matched=matched,
+            confidence=0.90 if matched else 0.0,
+            priority=90,
         )
 
     def create_plan(
         self,
         prompt: str,
     ) -> Plan:
-        """
-        Create a time tool execution plan.
-        """
 
         return Plan(
             action=ActionType.TOOL,

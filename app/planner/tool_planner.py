@@ -2,7 +2,7 @@ from app.enums.action_type import ActionType
 from app.models.plan import Plan
 from app.planner.base_planner import BasePlanner
 from app.planner.intents.registry import IntentRegistry
-
+from app.planner.intents.base_intent import BaseIntent
 
 class ToolPlanner(BasePlanner):
     """
@@ -24,20 +24,17 @@ class ToolPlanner(BasePlanner):
         Determine the next action.
         """
 
-        intent = self.registry.get_matching_intent(
+        intent: BaseIntent | None = self.registry.get_matching_intent(
             prompt,
         )
 
-        if intent:
-            print(f"[Planner] Selected: {intent.__class__.__name__}")
-        else:
+        if intent is None:
             print("[Planner] No intent selected. Falling back to CHAT.")
 
-        if intent:
-            return intent.create_plan(
-                prompt,
+            return Plan(
+                action=ActionType.CHAT,
             )
 
-        return Plan(
-            action=ActionType.CHAT,
-        )
+        print(f"[Planner] Selected: {intent.__class__.__name__}")
+
+        return intent.create_plan(prompt)
