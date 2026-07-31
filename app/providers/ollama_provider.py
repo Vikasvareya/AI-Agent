@@ -1,7 +1,10 @@
 from ollama import chat, ResponseError
 from app.config.providers.ollama_settings import OllamaSettings
 from app.providers.base_provider import BaseProvider
-from app.utils.logger import logger
+from app.utils.logger import get_logger
+
+
+logger = get_logger("OllamaProvider")
 
 
 class OllamaProvider(BaseProvider):
