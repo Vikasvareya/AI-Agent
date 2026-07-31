@@ -143,12 +143,12 @@ Current capabilities:
 
 ## Testing
 
-The project uses `pytest` for automated testing.
+    The project uses `pytest` for automated testing.
 
-Run all tests:
+    Run all tests:
 
-```bash
-pytest
+    ```bash
+    pytest
 
 ## 🛣 Roadmap
 
