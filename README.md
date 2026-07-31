@@ -140,6 +140,16 @@ Current capabilities:
 - Pronoun resolution
 - Multi-turn conversation context
 
+
+## Testing
+
+The project uses `pytest` for automated testing.
+
+Run all tests:
+
+```bash
+pytest
+
 ## 🛣 Roadmap
 
 1.  Context Resolver

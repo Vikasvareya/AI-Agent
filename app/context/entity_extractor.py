@@ -37,7 +37,7 @@ class EntityExtractor:
             if match:
                 entity = match.group(1).strip()
 
-                entity = entity.rstrip("?.!, ")
+                entity = entity.rstrip("?.!,").strip().title()
 
                 return entity.strip().title()
 
