@@ -26,7 +26,10 @@ Build an extensible AI Agent Framework capable of evolving into an enterprise-gr
 
 # 🚀 Current Version
 
-## **v0.2.0 – Intelligent Planning Foundation**
+## **v0.2.0 -- Planning Engine v2 Foundation**
+
+The framework has completed its core single-agent runtime foundation
+and is now evolving toward multi-step planning and execution.
 
 The framework now includes a clean layered architecture with:
 
@@ -172,7 +175,7 @@ app/
 
 ---
 
-# ✅ Completed Modules
+## ✅ Completed Modules
 
 ### Core
 
@@ -180,7 +183,7 @@ app/
 - Provider Factory
 - Ollama Provider
 - Conversation Memory
-- Logging Utility
+- Logging System
 
 ### Context Layer
 
@@ -191,11 +194,14 @@ app/
 
 ### Planning Layer
 
-- Planner
+- Planner Layer
 - Intent Registry
-- Intent Ranking
-- Math Intent
-- Time Intent
+- Intent Matching
+- Intent Priority & Confidence Ranking
+- Execution Plan
+- Execution Step
+- Execution Context
+- Plan & Step Lifecycle States
 
 ### Execution Layer
 
@@ -212,9 +218,9 @@ app/
 
 ### Testing
 
-- Entity Extraction Tests
-- Pronoun Resolution Tests
 - Context Resolver Tests
+- Pronoun Resolver Tests
+- Execution Model Tests
 
 ---
 
