@@ -1,434 +1,127 @@
-# 🤖 AI Agent Framework
+# AI Agent Framework
 
-A production-oriented **AI Agent Framework** built completely **from scratch in Python** to understand how modern AI agents work internally instead of relying on high-level frameworks.
+An extensible Python agent framework with a chat API, workflow foundation,
+and administrator coding workspace. The repository is evolving; some
+components are prototypes or single-process implementations, and it is not
+currently a proven high-traffic or high-availability platform.
 
-The goal is to design and implement every layer ourselves—from planning and execution to memory, tools, workflows, RAG, and multi-agent orchestration.
+## What exists today
 
----
+- Python planning, execution, tool, memory, plugin, workflow, and MCP building
+  blocks.
+- A threaded HTTP API and health service.
+- React chat with conversation persistence and installed Ollama model
+  discovery/switching.
+- A separate administrator coding workspace with scoped file access,
+  explicit editor saves, reviewed patch proposals, project sessions, and
+  optional read-only shares.
+- Optional Brave web search using per-message opt-in and separate search
+  terms.
+- Docker Compose and Kubernetes deployment examples.
 
-# 🎯 Vision
+**Important boundaries:** Ollama is the only provider currently instantiated.
+Workflow and some coding/runtime state is process-local. Chat is
+non-streaming; image/video generation and model training are not implemented.
+Skills, marketplace installs, automation, shell execution, and coding-agent
+plugin/MCP invocation are not available. See
+[Current Implementation](./docs/CURRENT_IMPLEMENTATION.md) and
+[Known Limitations](./docs/KNOWN_LIMITATIONS.md).
 
-Build an extensible AI Agent Framework capable of evolving into an enterprise-grade platform with support for:
+## Get started
 
-- ✅ Multiple LLM Providers
-- ✅ Intelligent Planning Engine
-- ✅ Tool Calling
-- ✅ Context Awareness
-- ✅ Conversation Memory
-- ✅ Workflow Orchestration
-- ⏳ Retrieval-Augmented Generation (RAG)
-- ⏳ Plugin Architecture
-- ⏳ Multi-Agent Collaboration
-- ⏳ Model Context Protocol (MCP)
-- ⏳ Human-in-the-Loop Workflows
+Requirements: Python version compatible with `pyproject.toml`, Node/npm for
+frontend builds, and a reachable Ollama instance for model-backed chat.
 
----
+PowerShell from the repository root:
 
-# 🚀 Current Version
-
-## **v0.2.0 -- Planning Engine v2 Foundation**
-
-The framework has completed its core single-agent runtime foundation
-and is now evolving toward multi-step planning and execution.
-
-The framework now includes a clean layered architecture with:
-
-- Context Resolution
-- Intent Ranking (Priority + Confidence)
-- Modular Planner
-- Executor Pipeline
-- Tool System
-- Conversation Memory
-- Logging
-- Automated Testing
-
-This version establishes the foundation for multi-step planning and future multi-agent capabilities.
-
----
-
-# 🏗 High-Level Architecture
-
-```text
-                         User
-                          │
-                          ▼
-                     ChatAgent
-                          │
-              ┌───────────┴───────────┐
-              ▼                       ▼
-      ContextResolver         ConversationMemory
-              │
-              ▼
-         ToolPlanner
-              │
-              ▼
-       IntentRegistry
-              │
-              ▼
-      Intent Ranking Engine
-     (Priority + Confidence)
-              │
-              ▼
-             Plan
-              │
-              ▼
-          Executor
-              │
-              ▼
-       ActionRegistry
-        ┌──────────────┐
-        ▼              ▼
-  ToolHandler    ChatHandler
-        │              │
-        ▼              ▼
- ToolManager    LLM Provider
-        │
- ┌──────┴────────┐
- ▼               ▼
-CalculatorTool  TimeTool
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python -m pip install -r requirements-chat.txt
+python -m app.api.server_main
 ```
 
----
+By default, the API listens on port `8081` and health routes on `8080`. Start
+Ollama separately and configure its URL/model through the environment. The API
+refuses a non-loopback bind unless `AI_AGENT_REQUIRE_AUTH=true` and at least
+one API/admin/user token is configured. See [.env.example](./.env.example)
+for local configuration keys; replace blank token values using a secure
+source before startup.
+`python main.py` starts the older interactive CLI, not the API.
 
-# 🧠 Current Request Flow
+For frontend verification:
 
-```text
-User
- │
- ▼
-ChatAgent
- │
- ▼
-ContextResolver
- │
- ▼
-ConversationMemory
- │
- ▼
-ToolPlanner
- │
- ▼
-IntentRegistry
- │
- ▼
-Intent Ranking
- │
- ▼
-Execution Plan
- │
- ▼
-Executor
- │
- ▼
-ActionRegistry
- │
- ▼
-Handler
- │
- ├── ToolHandler
- │       │
- │       ▼
- │   ToolManager
- │
- └── ChatHandler
-         │
-         ▼
-    LLM Provider
+```powershell
+Set-Location frontend
+npm ci
+npm run build
 ```
 
----
-
-# 📁 Project Structure
-
-```text
-app/
-│
-├── agents/
-├── config/
-├── context/
-│   ├── context_resolver.py
-│   ├── conversation_context.py
-│   ├── entity_extractor.py
-│   └── pronoun_resolver.py
-│
-├── enums/
-├── exceptions/
-├── executor/
-│   ├── handlers/
-│   ├── action_registry.py
-│   └── executor.py
-│
-├── factories/
-├── memory/
-├── models/
-├── planner/
-│   ├── intents/
-│   ├── models.py
-│   ├── registry.py
-│   └── tool_planner.py
-│
-├── providers/
-├── tools/
-├── utils/
-└── tests/
-```
-
----
-
-## ✅ Completed Modules
-
-### Core
-
-- Configuration Loader
-- Provider Factory
-- Ollama Provider
-- Conversation Memory
-- Logging System
-
-### Context Layer
-
-- Context Resolver
-- Conversation Context
-- Entity Extraction
-- Pronoun Resolution
-
-### Planning Layer
-
-- Planner Layer
-- Intent Registry
-- Intent Matching
-- Intent Priority & Confidence Ranking
-- Execution Plan
-- Execution Step
-- Execution Context
-- Plan & Step Lifecycle States
-
-### Execution Layer
-
-- Executor
-- Action Registry
-- Tool Handler
-- Chat Handler
-
-### Tool Layer
-
-- Tool Manager
-- Calculator Tool
-- Time Tool
-
-### Testing
-
-- Context Resolver Tests
-- Pronoun Resolver Tests
-- Execution Model Tests
-
----
-
-# 🧠 Intent Ranking Engine
-
-Unlike traditional rule-based routing, every intent now returns an `IntentMatch` object.
-
-```python
-IntentMatch(
-    matched=True,
-    confidence=0.95,
-    priority=100,
-)
-```
-
-The registry evaluates every registered intent before selecting the highest-ranked match.
-
-Benefits:
-
-- Priority-based routing
-- Confidence scoring
-- Easy extensibility
-- Future AI-based intent classification
-
----
-
-# 🧠 Context Resolution
-
-Current capabilities:
-
-- Entity Extraction
-- Pronoun Resolution
-- Conversation Context
-- Multi-turn Understanding
-
-Example:
-
-```
-User:
-Tell me about Python.
-
-User:
-Who created it?
-
-↓
-
-Resolved:
-
-Who created Python?
-```
-
----
-
-# 🧪 Testing
-
-The framework uses **pytest** for automated testing.
-
-Run all tests:
-
-```bash
-pytest
-```
-
-Current coverage includes:
-
-- Entity Extraction
-- Pronoun Resolution
-- Context Resolution
-
----
-
-# 🏛 Design Principles
-
-This framework is intentionally built using production-oriented software engineering practices.
-
-### Design Patterns
-
-- Factory Pattern
-- Strategy Pattern
-- Registry Pattern
-- Command Pattern
-- Dependency Injection (Gradually Introducing)
-
-### Engineering Principles
-
-- SOLID Principles
-- Layered Architecture
-- Separation of Concerns
-- Open/Closed Principle
-- Clean Code
-- Type Safety
-- Test-Driven Refactoring
-
----
-
-# 🛣 Development Roadmap
-
-## ✅ Phase 1 — Foundation
-
-- Configuration
-- Providers
-- Memory
-- Tool System
-- Planner
-- Executor
-- Context Resolver
-- Intent Ranking
-- Testing
-
----
-
-## 🚧 Phase 2 — Advanced Planning Engine
-
-- Multi-Step Plans
-- Execution Pipeline
-- Composite Plans
-- Tool Chaining
-- Planning Graph
-
----
-
-## 🚧 Phase 3 — Plugin Architecture
-
-- Plugin Loader
-- Plugin Discovery
-- Dynamic Registration
-- Dependency Injection
-
----
-
-## 🚧 Phase 4 — Memory & RAG
-
-- Vector Memory
-- Semantic Search
-- Knowledge Base
-- Retrieval-Augmented Generation
-
----
-
-## 🚧 Phase 5 — Agent Runtime
-
-- ReAct Loop
-- Reflection
-- Self Correction
-- Long-Term Memory
-
----
-
-## 🚧 Phase 6 — Multi-Agent System
-
-- Agent Registry
-- Coordinator Agent
-- Shared Memory
-- Message Bus
-- Task Delegation
-
----
-
-## 🚧 Phase 7 — Enterprise Features
-
-- Workflow Engine
-- Human Approval
-- REST API
-- WebSockets
-- Observability
-- Docker
-- Kubernetes
-- MCP Integration
-
----
-
-# 🎓 Learning Philosophy
-
-This project is intentionally built **without relying on AI abstraction frameworks**.
-
-Instead of using libraries that hide the implementation details, every architectural layer is implemented from scratch to understand:
-
-- How planners work
-- How executors work
-- How tools are invoked
-- How context is managed
-- How memories are stored
-- How workflows execute
-- How modern AI agents are designed internally
-
-The objective is to build an extensible framework that is educational, production-oriented, and capable of evolving into a complete AI platform.
-
----
-
-# 📄 License
-
-MIT License
-
----
-
-# ⭐ Future Goal
-
-By the final version, this framework aims to support:
-
-- Multi-Agent Collaboration
-- Workflow Automation
-- Plugin Ecosystem
-- RAG Pipelines
-- Human-in-the-Loop
-- MCP
-- Distributed Execution
-- Cloud Deployment
-- Python Package (`pip install`)
-- Production Dashboard
-
-**Build the framework. Understand every layer. Own the architecture.**
+See [API and Developer Guide](./docs/API_AND_DEVELOPER_GUIDE.md) and
+[Deployment and Operations](./docs/DEPLOYMENT_AND_OPERATIONS.md) for detailed
+setup.
+
+GitHub Actions runs the backend suite and frontend build on pushes and pull
+requests. It currently does not scan secrets or validate container/Kubernetes
+deployments.
+
+## Interfaces
+
+- Workflow operator UI: `/`
+- Chat: `/chat/`
+- Administrator coding workspace: `/coding/` (requires an enabled workspace
+  and administrator authorization)
+- API: `/v1/...`
+- Health: `/health/live`, `/health/ready` and related health-server routes
+
+The coding workspace requires `AI_AGENT_CODING_WORKSPACE` to point to an
+authorized directory. Manual patch review is the default. Do not expose
+development authentication mode or send private files to a model provider
+without authorization.
+
+Web search requires `AI_AGENT_BRAVE_SEARCH_API_KEY`. Users opt in per message
+and submit separate search terms; the chat prompt is not sent to Brave.
+
+## Documentation
+
+### Authoritative project guides
+
+- [Project Vision](./docs/PROJECT_VISION.md)
+- [Current Implementation](./docs/CURRENT_IMPLEMENTATION.md)
+- [Architecture](./docs/architecture.md)
+- [Product Roadmap](./docs/PRODUCT_ROADMAP.md)
+- [ARES Research and Evolution](./docs/ARES_RESEARCH_EVOLUTION.md) — proposed
+  only; no ARES capability is implemented
+- [Technology Strategy](./docs/TECHNOLOGY_STRATEGY.md)
+- [Security and Governance](./docs/SECURITY_AND_GOVERNANCE.md)
+- [API and Developer Guide](./docs/API_AND_DEVELOPER_GUIDE.md)
+- [Deployment and Operations](./docs/DEPLOYMENT_AND_OPERATIONS.md)
+- [Testing and Quality](./docs/TESTING_AND_QUALITY.md)
+- [Implementation Status](./docs/IMPLEMENTATION_STATUS.md)
+- [Architecture Decisions and Observations](./docs/ARCHITECTURE_DECISIONS.md)
+- [Known Limitations](./docs/KNOWN_LIMITATIONS.md)
+- [Contributing](./docs/CONTRIBUTING.md)
+- [Documentation Update Report](./docs/DOCUMENTATION_UPDATE_REPORT.md)
+
+### Detailed guides
+
+- [Coding Agent Workspace](./docs/coding-agent-workspace.md)
+- [REST and chat API reference](./docs/19-api.md)
+- [Deployment examples](./docs/22-deployment.md)
+- [MCP protocol building blocks](./docs/mcp.md)
+- [Module guide index](./docs/)
+
+## Security notice
+
+The tracked `.env` was removed from the Git index in the current worktree;
+the local file was preserved and is now ignored. Its contents were not read
+or reproduced. This does not erase prior commits: review repository/history
+exposure and rotate any potentially exposed credentials. See
+[Security and Governance](./docs/SECURITY_AND_GOVERNANCE.md) before deployment.
+
+## License
+
+No top-level `LICENSE` file was found during the documentation audit. Confirm
+and add the intended license before redistribution; this README does not
+assert a license.

@@ -4,11 +4,9 @@ from app.agents.chat_agent import ChatAgent
 from app.factories.provider_factory import ProviderFactory
 from app.memory.conversation_memory import ConversationMemory
 from app.tools.tool_manager import ToolManager
-from app.tools.calculator_tool import CalculatorTool
 from app.tools.time_tool import TimeTool
 from app.planner.tool_planner import ToolPlanner
 from app.planner.intents.registry import IntentRegistry
-from app.planner.intents.math_intent import MathIntent
 from app.planner.intents.time_intent import TimeIntent
 from app.executor.executor import Executor
 from app.executor.action_registry import ActionRegistry
@@ -16,6 +14,9 @@ from app.executor.handlers.tool_handler import ToolHandler
 from app.executor.handlers.chat_handler import ChatHandler
 from app.enums.action_type import ActionType
 from app.context.context_resolver import ContextResolver
+from app.plugins.plugin_loader import PluginLoader
+from app.memory.vector_memory import VectorMemory
+from app.memory.rag import RAGPipeline
 
 
 def main():
@@ -27,13 +28,17 @@ def main():
     provider_factory = ProviderFactory(settings)
     provider = provider_factory.create()
     memory = ConversationMemory()
+    rag = RAGPipeline(
+        VectorMemory(),
+    )
     tool_manager = ToolManager()
+    plugin_loader = PluginLoader(
+        registry,
+        tool_manager,
+    )
+    plugin_loader.discover()
 
     action_registry = ActionRegistry()
-
-    tool_manager.register(
-    CalculatorTool()
-     )
 
     tool_manager.register(
     TimeTool()
@@ -52,10 +57,13 @@ def main():
         ChatHandler(
             provider,
             memory,
+            rag,
         ),
     )
     
-    registry.register_default_intents()
+    registry.register(
+        TimeIntent()
+    )
 
     planner = ToolPlanner(
         registry,

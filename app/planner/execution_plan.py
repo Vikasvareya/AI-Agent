@@ -29,3 +29,17 @@ class ExecutionPlan:
     metadata: dict = field(
         default_factory=dict
     )
+
+    def add_step(
+        self,
+        step: ExecutionStep,
+        *,
+        depends_on_previous: bool = False,
+    ) -> ExecutionStep:
+        if depends_on_previous and self.steps:
+            step.dependencies.append(
+                self.steps[-1].id
+            )
+
+        self.steps.append(step)
+        return step

@@ -1,0 +1,68 @@
+services:
+  ai-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-agent-framework:local
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    environment:
+      AI_AGENT_HOST: 0.0.0.0
+      AI_AGENT_PORT: 8080
+      AI_AGENT_READY: "true"
+      AI_AGENT_REQUIRE_AUTH: "true"
+      AI_AGENT_ADMIN_TOKEN: ${AI_AGENT_ADMIN_TOKEN:?Set AI_AGENT_ADMIN_TOKEN}
+      AI_AGENT_USER_TOKEN: ${AI_AGENT_USER_TOKEN:?Set AI_AGENT_USER_TOKEN}
+      AI_AGENT_USER_TOKENS: ${AI_AGENT_USER_TOKENS:-}
+      AI_AGENT_API_PORT: 8081
+      AI_AGENT_API_HOST: 0.0.0.0
+      AI_AGENT_COOKIE_SECURE: "false"
+      AI_AGENT_CHAT_DATABASE: postgresql://ai_agent:${AI_AGENT_DB_PASSWORD}@postgres:5432/ai_agent
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: llama3.2
+      OLLAMA_TIMEOUT: "60"
+    volumes:
+      - ai-agent-data:/app/data
+    depends_on:
+      ollama:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ai_agent
+      POSTGRES_USER: ai_agent
+      POSTGRES_PASSWORD: ${AI_AGENT_DB_PASSWORD:?Set AI_AGENT_DB_PASSWORD to a URL-safe value}
+    volumes:
+      - chat-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ai_agent -d ai_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+volumes:
+  ai-agent-data:
+  ollama-data:
+  chat-postgres-data:

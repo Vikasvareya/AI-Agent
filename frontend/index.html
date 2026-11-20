@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>AI Agent Control Plane</title>
+  <style>
+    :root {
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      color: #e8eefb;
+      background: #080d18;
+      --panel: #101827;
+      --raised: #151f31;
+      --border: #26344a;
+      --muted: #91a0b7;
+      --accent: #87aaff;
+      --green: #67d6a2;
+      --yellow: #ffd37b;
+      --red: #ff8293;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; }
+    button, input, textarea, select { font: inherit; }
+    button {
+      padding: 9px 13px; border: 1px solid transparent; border-radius: 8px;
+      color: #08101f; background: var(--accent); font-weight: 700; cursor: pointer;
+    }
+    button:hover { filter: brightness(1.08); }
+    button:disabled { opacity: .48; cursor: not-allowed; }
+    button.secondary { background: var(--raised); color: #e8eefb; border-color: var(--border); }
+    button.danger { background: #662b38; color: #ffdce2; }
+    input, textarea, select {
+      width: 100%; color: #e8eefb; background: #0a111e;
+      border: 1px solid var(--border); border-radius: 8px; padding: 10px;
+    }
+    textarea { min-height: 116px; resize: vertical; font-family: ui-monospace, monospace; font-size: 13px; }
+    label { display: block; color: var(--muted); font-size: 12px; margin: 12px 0 6px; }
+    header {
+      height: 66px; padding: 0 22px; display: flex; align-items: center;
+      justify-content: space-between; border-bottom: 1px solid var(--border);
+      background: #0c1320; position: sticky; top: 0; z-index: 2;
+    }
+    h1 { font-size: 17px; margin: 0; letter-spacing: .2px; }
+    h2 { font-size: 14px; margin: 0; }
+    .header-right, .row, .actions { display: flex; align-items: center; gap: 9px; }
+    .muted, .hint { color: var(--muted); font-size: 12px; }
+    .pill { font-size: 11px; border-radius: 999px; padding: 4px 8px; background: #233149; color: #c8d7f0; }
+    .pill.completed { background: #174535; color: #a4f0c9; }
+    .pill.failed, .pill.cancelled { background: #502632; color: #ffc0ca; }
+    .pill.waiting_approval { background: #4a3c20; color: var(--yellow); }
+    main { max-width: 1440px; margin: auto; padding: 18px; }
+    .layout { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 16px; }
+    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+    .panel-head { padding: 13px 15px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+    .panel-body { padding: 15px; }
+    .stack { display: grid; gap: 10px; }
+    .workflow-card, .run-card {
+      border: 1px solid var(--border); background: #0d1523; border-radius: 9px;
+      padding: 11px; cursor: pointer;
+    }
+    .workflow-card.selected, .run-card.selected { border-color: var(--accent); }
+    .workflow-card strong, .run-card strong { display: block; margin-bottom: 5px; }
+    .split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
+    .tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border); padding: 0 15px; }
+    .tab { padding: 11px 10px; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; font-size: 13px; }
+    .tab.active { color: var(--accent); border-color: var(--accent); }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 340px; overflow: auto; background: #090f19; border: 1px solid var(--border); border-radius: 8px; padding: 12px; font-size: 12px; }
+    #events { max-height: 210px; overflow: auto; }
+    .event { font: 12px ui-monospace, monospace; border-left: 2px solid var(--accent); background: #0b1321; padding: 8px; margin: 7px 0; overflow-wrap: anywhere; }
+    .notice { margin: 12px 0; padding: 10px 12px; background: #2a2131; border: 1px solid #55364a; border-radius: 8px; color: #ffd0d8; font-size: 13px; }
+    .hidden { display: none !important; }
+    .auth-wrap { max-width: 460px; margin: 9vh auto; padding: 16px; }
+    .auth-wrap .panel-body { padding: 20px; }
+    .empty { color: var(--muted); text-align: center; padding: 22px 10px; font-size: 13px; }
+    @media (max-width: 850px) {
+      .layout { grid-template-columns: 1fr; }
+      .split { grid-template-columns: 1fr; }
+      main { padding: 12px; }
+      header { padding: 0 14px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>AI Agent Control Plane</h1>
+    <div class="header-right">
+      <a href="/chat/" style="color:#e8eefb;text-decoration:none;padding:8px 11px;border:1px solid #26344a;border-radius:8px;background:#151f31;font-size:12px">Open AI Chat</a>
+      <span id="health" class="muted">Checking service...</span>
+      <span id="identity" class="pill hidden"></span>
+      <button id="logout" class="secondary hidden">Sign out</button>
+    </div>
+  </header>
+
+  <div id="login-view" class="auth-wrap">
+    <section class="panel">
+      <div class="panel-head"><h2>Sign in</h2><span class="pill">Bearer token</span></div>
+      <div class="panel-body">
+        <p class="muted">Use your administrator or user token supplied by your deployment operator.</p>
+        <label for="token">Access token</label>
+        <input id="token" type="password" autocomplete="current-password" placeholder="Paste access token">
+        <div class="actions" style="margin-top:14px">
+          <button id="login">Connect</button>
+        </div>
+        <div id="login-error" class="notice hidden"></div>
+      </div>
+    </section>
+  </div>
+
+  <main id="app-view" class="hidden">
+    <div id="notice" class="notice hidden"></div>
+    <div class="layout">
+      <aside class="panel">
+        <div class="panel-head">
+          <h2>Workflows</h2>
+          <button id="refresh" class="secondary">Refresh</button>
+        </div>
+        <div class="panel-body">
+          <div id="workflows" class="stack"></div>
+          <div id="create-workflow" class="hidden">
+            <label for="workflow-definition">New workflow definition</label>
+            <p class="hint">Supported node types: value, context, join. Actions run only from these safe built-in types.</p>
+            <textarea id="workflow-definition">{
+  "name": "My workflow",
+  "nodes": [
+    {"name": "prepare", "type": "context", "key": "message"},
+    {"name": "review", "type": "value", "value": "Ready for review", "dependencies": ["prepare"], "requires_approval": true}
+  ]
+}</textarea>
+            <button id="create" style="margin-top:9px">Create workflow</button>
+          </div>
+        </div>
+      </aside>
+
+      <div class="stack">
+        <section class="panel">
+          <div class="panel-head">
+            <h2 id="selected-workflow">Select a workflow</h2>
+            <span id="run-status" class="pill">no run</span>
+          </div>
+          <div class="tabs">
+            <div class="tab active" data-tab="run-panel">Run</div>
+            <div class="tab" data-tab="history-panel">Run history</div>
+          </div>
+          <div id="run-panel" class="panel-body">
+            <div class="split">
+              <div>
+                <label for="context">Initial context (JSON)</label>
+                <textarea id="context">{ "message": "Hello from the operator dashboard" }</textarea>
+                <div class="toolbar" style="margin-top:9px">
+                  <button id="start" disabled>Start run</button>
+                  <button id="cancel" class="danger" disabled>Cancel run</button>
+                </div>
+              </div>
+              <div>
+                <label>Pending approvals</label>
+                <div id="approvals" class="stack"><div class="empty">No approvals pending.</div></div>
+                <label>Selected run</label>
+                <pre id="details">Select a workflow and start a run.</pre>
+              </div>
+            </div>
+            <label>Live workflow events</label>
+            <div id="events"></div>
+          </div>
+          <div id="history-panel" class="panel-body hidden">
+            <div id="runs" class="stack"><div class="empty">No runs found.</div></div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const state = {
+      token: sessionStorage.getItem('agent-token') || '',
+      role: '',
+      workflows: [],
+      workflowId: '',
+      run: null,
+      eventController: null
+    };
+    const $ = id => document.getElementById(id);
+
+    function showNotice(message, target='notice') {
+      const element=$(target);
+      element.textContent=message;
+      element.classList.remove('hidden');
+    }
+
+    async function api(path, options={}) {
+      const headers={...(options.headers||{})};
+      if (state.token) headers.Authorization=`Bearer ${state.token}`;
+      if (options.body) headers['Content-Type']='application/json';
+      const response=await fetch(path,{...options,headers});
+      const data=await response.json().catch(()=>({}));
+      if (!response.ok) {
+        if (response.status===401 && path!=='/v1/session') {
+          signOut(false);
+          showNotice('Your session expired. Sign in again.','login-error');
+        }
+        throw new Error(data.message||`${response.status} ${response.statusText}`);
+      }
+      return data;
+    }
+
+    async function signIn() {
+      state.token=$('token').value.trim();
+      $('login-error').classList.add('hidden');
+      try {
+        const session=await api('/v1/session');
+        state.role=session.role;
+        sessionStorage.setItem('agent-token',state.token);
+        $('identity').textContent=state.role;
+        $('identity').classList.remove('hidden');
+        $('logout').classList.remove('hidden');
+        $('login-view').classList.add('hidden');
+        $('app-view').classList.remove('hidden');
+        $('create-workflow').classList.toggle('hidden',state.role!=='admin');
+        await refreshAll();
+      } catch (error) {
+        state.token='';
+        showNotice(error.message,'login-error');
+      }
+    }
+
+    function signOut(clear=true) {
+      if (state.eventController) state.eventController.abort();
+      state.token='';
+      state.role='';
+      state.run=null;
+      if (clear) sessionStorage.removeItem('agent-token');
+      $('identity').classList.add('hidden');
+      $('logout').classList.add('hidden');
+      $('app-view').classList.add('hidden');
+      $('login-view').classList.remove('hidden');
+    }
+
+    async function checkHealth() {
+      try {
+        const headers=state.token?{Authorization:`Bearer ${state.token}`}:{};
+        const response=await fetch('/health',{headers});
+        $('health').textContent=response.ok?'Service healthy':'Service unavailable';
+      } catch {
+        $('health').textContent='Sign in to verify service';
+      }
+    }
+
+    async function refreshAll() {
+      await Promise.all([loadWorkflows(),loadRuns()]);
+    }
+
+    async function loadWorkflows() {
+      const data=await api('/v1/workflows');
+      state.workflows=data.workflows;
+      if (!state.workflows.some(item=>item.id===state.workflowId)) {
+        state.workflowId=state.workflows[0]?.id||'';
+      }
+      renderWorkflows();
+    }
+
+    function renderWorkflows() {
+      const host=$('workflows');
+      host.replaceChildren();
+      if (!state.workflows.length) {
+        host.innerHTML='<div class="empty">No workflows are registered.</div>';
+      }
+      for (const workflow of state.workflows) {
+        const card=document.createElement('button');
+        card.className=`workflow-card ${workflow.id===state.workflowId?'selected':''}`;
+        card.type='button';
+        card.innerHTML=`<strong>${escapeHtml(workflow.name)}</strong><span class="muted">${workflow.nodes.length} node(s)</span>`;
+        card.onclick=()=>selectWorkflow(workflow.id);
+        host.append(card);
+      }
+      const selected=state.workflows.find(item=>item.id===state.workflowId);
+      $('selected-workflow').textContent=selected?.name||'Select a workflow';
+      $('start').disabled=!selected;
+    }
+
+    function selectWorkflow(id) {
+      state.workflowId=id;
+      renderWorkflows();
+    }
+
+    async function createWorkflow() {
+      try {
+        const definition=JSON.parse($('workflow-definition').value);
+        const created=await api('/v1/workflows',{method:'POST',body:JSON.stringify(definition)});
+        await loadWorkflows();
+        selectWorkflow(created.id);
+        showNotice(`Workflow "${created.name}" created.`);
+      } catch (error) {
+        showNotice(error instanceof SyntaxError?'Workflow definition is not valid JSON.':error.message);
+      }
+    }
+
+    async function startRun() {
+      if (!state.workflowId) return;
+      try {
+        const context=JSON.parse($('context').value);
+        if (!context||Array.isArray(context)||typeof context!=='object') throw new Error('Context must be a JSON object.');
+        const run=await api(`/v1/workflows/${state.workflowId}/runs`,{
+          method:'POST',
+          body:JSON.stringify({
+            context,
+            idempotency_key:globalThis.crypto?.randomUUID?.()||`${Date.now()}-${Math.random()}`
+          })
+        });
+        selectRun(run);
+        watchEvents(run.id);
+        await loadRuns();
+        switchTab('run-panel');
+      } catch (error) {
+        showNotice(error instanceof SyntaxError?'Initial context is not valid JSON.':error.message);
+      }
+    }
+
+    async function loadRuns() {
+      try {
+        const data=await api('/v1/runs');
+        const host=$('runs');
+        host.replaceChildren();
+        if (!data.runs.length) {
+          host.innerHTML='<div class="empty">No runs found.</div>';
+          return;
+        }
+        for (const run of [...data.runs].reverse()) {
+          const card=document.createElement('button');
+          card.type='button';
+          card.className=`run-card ${state.run?.id===run.id?'selected':''}`;
+          card.innerHTML=`<strong>${escapeHtml(run.id.slice(0,8))} <span class="pill ${run.status}">${escapeHtml(run.status)}</span></strong><span class="muted">${escapeHtml(run.workflow_id)}</span>`;
+          card.onclick=async()=> {
+            try { selectRun(await api(`/v1/runs/${run.id}`)); watchEvents(run.id); switchTab('run-panel'); }
+            catch(error) { showNotice(error.message); }
+          };
+          host.append(card);
+        }
+      } catch(error) {
+        $('runs').innerHTML=`<div class="empty">${escapeHtml(error.message)}</div>`;
+      }
+    }
+
+    function selectRun(run) {
+      state.run=run;
+      renderRun(run);
+    }
+
+    function renderRun(run) {
+      $('run-status').textContent=run.status;
+      $('run-status').className=`pill ${run.status}`;
+      $('details').textContent=JSON.stringify(run,null,2);
+      $('cancel').disabled=['completed','failed','cancelled'].includes(run.status);
+      const approvals=Object.entries(run.approvals||{}).filter(([,status])=>status==='pending');
+      const host=$('approvals');
+      host.replaceChildren();
+      if (!approvals.length) host.innerHTML='<div class="empty">No approvals pending.</div>';
+      for (const [node] of approvals) {
+        const item=document.createElement('div');
+        item.className='workflow-card';
+        const title=document.createElement('strong');
+        title.textContent=node;
+        const buttons=document.createElement('div');
+        buttons.className='toolbar';
+        for (const [label,approved] of [['Approve',true],['Reject',false]]) {
+          const button=document.createElement('button');
+          button.textContent=label;
+          button.className=approved?'':'danger';
+          button.disabled=state.role!=='admin';
+          button.onclick=()=>decideApproval(node,approved);
+          buttons.append(button);
+        }
+        item.append(title,buttons);
+        host.append(item);
+      }
+      loadRuns();
+    }
+
+    async function decideApproval(node,approved) {
+      try {
+        const run=await api(`/v1/runs/${state.run.id}/approvals/${encodeURIComponent(node)}`,{
+          method:'POST',
+          body:JSON.stringify({approved})
+        });
+        selectRun(run);
+        if (['completed','failed'].includes(run.status)) stopEvents();
+      } catch(error) { showNotice(error.message); }
+    }
+
+    async function cancelRun() {
+      if (!state.run||!confirm('Cancel this workflow run?')) return;
+      try {
+        selectRun(await api(`/v1/runs/${state.run.id}/cancel`,{method:'POST',body:'{}'}));
+        stopEvents();
+      } catch(error) { showNotice(error.message); }
+    }
+
+    function stopEvents() {
+      if (state.eventController) state.eventController.abort();
+      state.eventController=null;
+    }
+
+    async function watchEvents(runId) {
+      stopEvents();
+      const controller=new AbortController();
+      state.eventController=controller;
+      $('events').replaceChildren();
+      try {
+        const response=await fetch(`/v1/runs/${runId}/events`,{
+          headers:{Authorization:`Bearer ${state.token}`},
+          signal:controller.signal
+        });
+        if (!response.ok||!response.body) throw new Error(`Event stream failed (${response.status}).`);
+        const reader=response.body.getReader();
+        const decoder=new TextDecoder();
+        let buffer='';
+        while(true) {
+          const {value,done}=await reader.read();
+          if(done) break;
+          buffer+=decoder.decode(value,{stream:true});
+          const blocks=buffer.split(/\r?\n\r?\n/);
+          buffer=blocks.pop()||'';
+          for(const block of blocks) {
+            const eventName=(block.match(/^event:\s*(.+)$/m)||[])[1]||'message';
+            const data=(block.match(/^data:\s*(.+)$/m)||[])[1];
+            if(data) {
+              addEvent(eventName,data);
+              try {
+                const event=JSON.parse(data);
+                if(event.payload?.run_id===state.run?.id) refreshSelectedRun();
+              } catch {}
+            }
+          }
+        }
+      } catch(error) {
+        if(error.name!=='AbortError') addEvent('stream.error',error.message);
+      }
+    }
+
+    async function refreshSelectedRun() {
+      if(!state.run) return;
+      try { selectRun(await api(`/v1/runs/${state.run.id}`)); }
+      catch(error) { showNotice(error.message); }
+    }
+
+    function addEvent(type,data) {
+      const item=document.createElement('div');
+      item.className='event';
+      item.textContent=`${type}: ${data}`;
+      $('events').prepend(item);
+      while($('events').children.length>100) $('events').lastElementChild.remove();
+    }
+
+    function switchTab(id) {
+      document.querySelectorAll('.tab').forEach(tab=>tab.classList.toggle('active',tab.dataset.tab===id));
+      $('run-panel').classList.toggle('hidden',id!=='run-panel');
+      $('history-panel').classList.toggle('hidden',id!=='history-panel');
+    }
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+    }
+
+    $('login').onclick=signIn;
+    $('token').onkeydown=event=>{if(event.key==='Enter')signIn();};
+    $('logout').onclick=()=>signOut();
+    $('refresh').onclick=()=>refreshAll().catch(error=>showNotice(error.message));
+    $('start').onclick=startRun;
+    $('cancel').onclick=cancelRun;
+    $('create').onclick=createWorkflow;
+    document.querySelectorAll('.tab').forEach(tab=>tab.onclick=()=>switchTab(tab.dataset.tab));
+    checkHealth();
+    if(state.token) { $('token').value=state.token; signIn(); }
+  </script>
+</body>
+</html>

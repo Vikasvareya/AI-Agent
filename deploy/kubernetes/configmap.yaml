@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-agent-config
+  namespace: ai-agent
+data:
+  AI_AGENT_HOST: "0.0.0.0"
+  AI_AGENT_PORT: "8080"
+  AI_AGENT_READY: "true"
+  AI_AGENT_REQUIRE_AUTH: "true"
+  AI_AGENT_API_PORT: "8081"
+  AI_AGENT_API_HOST: "0.0.0.0"
+  AI_AGENT_COOKIE_SECURE: "true"
+  OLLAMA_HOST: "http://ollama.ai-agent.svc.cluster.local:11434"
+  OLLAMA_MODEL: "llama3.2"

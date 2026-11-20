@@ -3,6 +3,8 @@ from app.models.plan import Plan
 from app.planner.base_planner import BasePlanner
 from app.planner.intents.registry import IntentRegistry
 from app.planner.intents.base_intent import BaseIntent
+from app.planner.execution_plan import ExecutionPlan
+from app.planner.execution_step import ExecutionStep
 
 class ToolPlanner(BasePlanner):
     """
@@ -19,7 +21,7 @@ class ToolPlanner(BasePlanner):
     def plan(
         self,
         prompt: str,
-    ) -> Plan:
+    ) -> Plan | ExecutionPlan:
         """
         Determine the next action.
         """
@@ -31,10 +33,26 @@ class ToolPlanner(BasePlanner):
         if intent is None:
             print("[Planner] No intent selected. Falling back to CHAT.")
 
-            return Plan(
+            plan = Plan(
                 action=ActionType.CHAT,
             )
+        else:
+            print(f"[Planner] Selected: {intent.__class__.__name__}")
+            plan = intent.create_plan(prompt)
 
-        print(f"[Planner] Selected: {intent.__class__.__name__}")
+        step = ExecutionStep(
+            action=plan.action,
+            args={
+                **plan.args,
+                **(
+                    {"tool": plan.tool}
+                    if plan.tool is not None
+                    else {}
+                ),
+            },
+        )
 
-        return intent.create_plan(prompt)
+        return ExecutionPlan(
+            goal=prompt,
+            steps=[step],
+        )
