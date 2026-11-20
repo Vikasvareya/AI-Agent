@@ -22,6 +22,11 @@ independently reviewed deployment and identity boundary.
 - Web search is opt-in per message and submits separate search terms rather
   than the chat prompt. Search results remain untrusted input.
 - Health and API ports can be configured independently.
+- Expired credential metadata and old rate-limit counters are pruned on
+  startup; defaults retain credential metadata for 30 days and remove
+  rate-limit hits older than 24 hours.
+- Cross-origin browser access is denied unless the exact origin is listed in
+  `AI_AGENT_ALLOWED_ORIGINS`; same-origin requests remain allowed.
 
 ## Material limitations and audit findings
 
@@ -35,13 +40,24 @@ independently reviewed deployment and identity boundary.
   non-loopback binds unless authentication is required and at least one token
   is configured. Never expose local-development mode publicly.
 - Tokens are static configuration, not a managed identity, session-revocation,
-  or full RBAC system. Multiple replicas need consistent identity mapping.
-- Rate limiting is process-local and not resistant to distributed abuse.
+  or full RBAC system. Durable credentials can now be issued, rotated, expired,
+  and revoked through admin APIs; static environment tokens remain supported
+  for deployment compatibility. Multiple replicas need consistent database and
+  identity mapping.
+- Rate limiting uses shared `ChatStore` counters when persistent chat storage is
+  configured, and remains process-local for standalone servers.
 - The server persists owner-scoped pending coding proposals, permission mode,
   and proposal/permission audit events in `ChatStore`; owner and actor values
   are digests, not bearer tokens. Interrupted applies are invalidated on
-  restart. Audit retention and a read/export API are not implemented, and
-  permission changes are not synchronized across live replicas.
+  restart. Administrators can inspect coding and general privileged-action
+  audit records through bounded, paginated read APIs. Coding and general audit
+  events are pruned after 365 days by default. Set
+  `AI_AGENT_CODING_AUDIT_RETENTION_DAYS=0` or
+  `AI_AGENT_AUDIT_RETENTION_DAYS=0` to disable the respective pruning policy.
+  Covered workflow       actions include workflow and coding mutations, run creation and cancellation,
+  approval decisions, and coding session/share changes. Live coding-agent
+  instances reconcile permission and proposal state from `ChatStore`; proposals
+  claimed by one replica are no longer usable by another replica.
 - Plugins import Python code in-process. No plugin sandbox or signature
   verification exists. MCP is not connected to the coding agent.
 - The API does not provide a code-execution sandbox. Do not add shell or
@@ -71,8 +87,9 @@ fixtures, screenshots, and reports.
 2. Require secure authentication for deployed environments and define token
    rotation, revocation, and recovery.
 3. Extend durable authorization/audit coverage to all privileged actions and
-   define audit retention/export controls; coding proposals already use
-   digest-scoped ownership and durable action records.
+   define export/retention controls for each event class; coding proposals
+   already use digest-scoped ownership, durable action records, and a
+   configurable one-year retention default.
 4. Add cross-replica coordination for proposal decisions and permission
    updates; move distributed rate limiting, workflow execution coordination,
    and event delivery to appropriate shared services before horizontal

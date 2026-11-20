@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from urllib.error import URLError
 
 from app.config.providers.ollama_settings import OllamaSettings
 from app.providers.ollama_provider import OllamaProvider
@@ -85,3 +86,37 @@ def test_ollama_ask_closes_a_client_with_coding_timeout(monkeypatch):
     assert clients[0].host == "http://localhost:11434"
     assert clients[0].timeout == 120
     assert clients[0].closed is True
+
+
+def test_ollama_health_check_reports_service_availability(monkeypatch):
+    provider = OllamaProvider(
+        OllamaSettings(
+            host="http://localhost:11434/",
+            model="alpha:latest",
+            timeout=10,
+        )
+    )
+    requested = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    def available(url, *, timeout):
+        requested.append((url, timeout))
+        return Response()
+
+    monkeypatch.setattr("app.providers.ollama_provider.urlopen", available)
+    assert provider.health_check() is True
+    assert requested == [("http://localhost:11434/", 2.0)]
+
+    def unavailable(*_args, **_kwargs):
+        raise URLError("service unavailable")
+
+    monkeypatch.setattr("app.providers.ollama_provider.urlopen", unavailable)
+    assert provider.health_check() is False

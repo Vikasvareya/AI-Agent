@@ -1,5 +1,4 @@
-import os
-import threading
+import json
 import urllib.error
 import urllib.request
 
@@ -10,6 +9,10 @@ def test_health_endpoints_and_metrics():
     server = HealthServer(
         host="127.0.0.1",
         port=0,
+        readiness_checks={
+            "database": lambda: True,
+            "ollama": lambda: True,
+        },
     )
     server.start()
     port = server._server.server_address[1]
@@ -23,6 +26,20 @@ def test_health_endpoints_and_metrics():
             assert b'"status": "live"' in response.read()
 
         with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/health/ready",
+            timeout=2,
+        ) as response:
+            payload = json.loads(response.read())
+            assert response.status == 200
+            assert payload == {
+                "status": "ready",
+                "dependencies": {
+                    "database": "available",
+                    "ollama": "available",
+                },
+            }
+
+        with urllib.request.urlopen(
             f"http://127.0.0.1:{port}/metrics",
             timeout=2,
         ) as response:
@@ -32,11 +49,14 @@ def test_health_endpoints_and_metrics():
         server.stop()
 
 
-def test_ready_endpoint_can_report_not_ready():
-    os.environ["AI_AGENT_READY"] = "false"
+def test_ready_endpoint_reports_unavailable_dependencies():
     server = HealthServer(
         host="127.0.0.1",
         port=0,
+        readiness_checks={
+            "database": lambda: True,
+            "ollama": lambda: False,
+        },
     )
     server.start()
     port = server._server.server_address[1]
@@ -50,6 +70,13 @@ def test_ready_endpoint_can_report_not_ready():
             assert False, "Expected 503 readiness response"
         except urllib.error.HTTPError as exc:
             assert exc.code == 503
+            payload = json.loads(exc.read())
+            assert payload == {
+                "status": "not_ready",
+                "dependencies": {
+                    "database": "available",
+                    "ollama": "unavailable",
+                },
+            }
     finally:
-        os.environ.pop("AI_AGENT_READY", None)
         server.stop()

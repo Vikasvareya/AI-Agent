@@ -16,7 +16,7 @@ flowchart LR
     Coding[Coding workspace]
     Workflow[In-process workflow engine]
     Runtime[CLI planner, agents, executor, tools]
-    Provider[Ollama provider]
+    Provider[Configured Ollama or OpenAI-compatible provider]
     Store[(SQLite or PostgreSQL)]
     Events[In-process event bus and SSE]
     Search[Optional Brave Search]

@@ -1,7 +1,7 @@
 # Coding Agent Workspace
 
 The coding workspace is a separate administrator-facing application at
-`/coding/`. It shares the React/Vite bundle and API deployment with chat, but
+`/chat/coding/`. It shares the React/Vite bundle and API deployment with chat, but
 has its own workspace-first navigation and task flow.
 
 ## Current workflow
@@ -17,15 +17,17 @@ installation are not configured capabilities.
 
 1. Configure `AI_AGENT_CODING_WORKSPACE` to an existing project directory.
 2. Sign in as an administrator. The workspace root and each eligible direct
-   child folder appear as projects; **Add project** creates another direct
-   child folder inside the configured root. Arbitrary paths outside that root
-   cannot be added.
+   child folder appear as projects. In **Settings > Projects**, create a
+   project inside a selected parent directory or add an existing project from
+   the server's file system. The location picker can browse drives and folders;
+   the selected external project is registered in the chat database so it
+   remains available after restart.
 3. Create or reopen a project session. Sessions are persisted in the configured
    chat database and keep their prompts and proposals across reloads/restarts.
    The latest 12 saved messages, capped at 16,000 characters, are supplied as
    untrusted context for follow-up tasks.
 4. Open an eligible file in the editor or create a file in an existing
-   workspace directory. Saving is an explicit administrator action and checks
+   selected-project directory. Saving is an explicit administrator action and checks
    that an opened file has not changed since it was loaded. The HTML preview
    runs in a sandbox with scripts and external network resources blocked;
    other file types use a text preview.
@@ -37,9 +39,15 @@ installation are not configured capabilities.
    checks that source files have not changed since generation.
 
 The editor can create files only in existing directories. Creating project
-folders at the workspace root is supported; nested directory creation, file
-deletion, rename, command execution, and automatic plugin/MCP invocation are
-not supported.
+folders at the workspace root is supported. Administrators can permanently
+delete a configured-workspace child folder and its saved conversations after
+confirmation; the workspace root cannot be deleted. Removing an
+externally-selected project only removes its workspace link and saved
+conversations; the project files remain untouched. Conversations can also be
+deleted individually, which removes their messages and invalidates their share
+links.
+Individual file deletion, rename, nested directory creation, command execution,
+and automatic plugin/MCP invocation are not supported.
 
 ## Permission modes
 
@@ -53,9 +61,10 @@ not supported.
 | Invoke plugins or MCP tools | Disabled | Disabled |
 
 Auto mode requires an explicit confirmation through the administrator API and
-is limited to the configured workspace. The server persists permission mode,
-owner-scoped pending proposals, and hashed-actor audit events in the configured
-`ChatStore`. Permission mode, including confirmed auto mode, survives restart.
+is limited to the selected project directory. The server persists permission
+mode, owner-scoped pending proposals, and hashed-actor audit events in the
+configured `ChatStore`. Permission mode, including confirmed auto mode,
+survives restart.
 Pending proposals can be applied after restart if the workspace identity is
 unchanged; a proposal interrupted during application is invalidated and must
 be generated again. Standalone `CodingAgent` instances without a store remain
@@ -87,10 +96,14 @@ separate session history.
 
 ### Editor and project boundaries
 
-Projects are direct folders under `AI_AGENT_CODING_WORKSPACE`; existing
-direct child folders are automatically listed. The editor reads and writes
-only allowlisted text formats inside that root, enforces the 32 KiB file limit,
-and uses an explicit Save action with stale-file checks. HTML preview is
+Projects can be direct folders under `AI_AGENT_CODING_WORKSPACE` or
+administrator-selected external directories. The directory browser and project
+management APIs are administrator-only and operate on the server's file system.
+For container deployments, mount the selected host directories into the API
+container first.
+The editor reads and writes only allowlisted text formats inside the selected
+project directory, enforces the 32 KiB file limit, and uses an explicit Save
+action with stale-file checks. HTML preview is
 sandboxed and blocks scripts and remote resources. Editor saves are direct
 user actions; agent-generated patches still follow the separate manual/auto
 permission mode.
@@ -125,15 +138,18 @@ metadata and messages use the same store.
 
 The current service is a local/single-instance foundation, not a proven
 high-traffic coding platform. Permission changes are not synchronized across
-live replicas; audit retention/export, distributed job orchestration,
-quota/rate controls, immutable artifact storage, and load/chaos tests remain
-future work. Multi-file writes use staged temporary files with rollback
-attempts, but cross-filesystem transactions are not guaranteed.
+live replicas; audit coverage beyond coding actions, distributed job
+orchestration, quota/rate controls, immutable artifact storage, and load/chaos
+tests remain future work. Coding audit events are available through a paginated
+admin API and are pruned after 365 days by default; set
+`AI_AGENT_CODING_AUDIT_RETENTION_DAYS=0` to retain them indefinitely.
+Multi-file writes use staged temporary files with rollback attempts, but
+cross-filesystem transactions are not guaranteed.
 
 ## Planned platform milestones
 
-1. Extend proposal ownership to an explicit tenant model and add audit
-   retention/export controls.
+1. Extend proposal ownership to an explicit tenant model and add audit coverage
+   for privileged actions beyond the coding workspace.
 2. Add isolated worktree/container execution with resource/network controls
    and per-command approvals; do not run untrusted code in the API process.
 3. Add a reviewed skill registry, signed plugin manifests, and an MCP server

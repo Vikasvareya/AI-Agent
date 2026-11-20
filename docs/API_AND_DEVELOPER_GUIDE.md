@@ -13,7 +13,10 @@ python -m app.api.server_main
 ```
 
 The API listens on `http://127.0.0.1:8081` by default; health endpoints listen
-on port `8080`. Configure and start Ollama separately. The interactive CLI is
+on port `8080`. Ollama is the default model provider. To select the
+OpenAI-compatible adapter, set `AI_AGENT_PROVIDER=openai_compatible` and
+configure the `OPENAI_COMPATIBLE_*` server environment variables. The
+interactive CLI is
 `python main.py`; it is not the API service. See
 [Deployment and Operations](./DEPLOYMENT_AND_OPERATIONS.md) for environment
 and container setup.
@@ -43,7 +46,7 @@ The current API includes:
 - Chat guest sessions, conversations, model discovery, capability listing,
   and message submission.
 - Admin-only coding workspace projects, file reads/writes, sessions, shares,
-  permission mode, and patch proposals.
+  permission mode, patch proposals, and paginated audit records.
 - Health/readiness endpoints and server-sent workflow events.
 
 The detailed route list and payload examples are maintained in
@@ -72,9 +75,12 @@ are marked failed without replay. Python callable workflows are not persisted,
 and live execution is not coordinated across replicas. Coding proposals,
 permission mode, and hashed-actor audit events also persist; applying
 proposals are invalidated on restart. Permission updates are not synchronized
-across live replicas. Event subscribers and rate-limit state remain
-process-local. Chat completion is non-streaming. The chat API does not
-currently use the CLI RAG path.
+across live replicas. Administrators can inspect recent coding audit records
+through a bounded read endpoint. Coding audit events are retained for 365 days
+by default; `AI_AGENT_CODING_AUDIT_RETENTION_DAYS=0` disables automatic
+pruning. Event subscribers and rate-limit state remain process-local. Chat
+completion is non-streaming. The chat API does not currently use the CLI RAG
+path.
 
 The coding agent is an administrator tool for bounded file context and
 validated proposals. It does not execute code or commands. Permission mode

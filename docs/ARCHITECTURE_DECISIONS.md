@@ -16,12 +16,13 @@ authentication and at least one configured token; invalid boolean
 configuration fails rather than silently disabling auth. This is a startup
 guard, not managed identity or a replacement for network/TLS controls.
 
-### Provider seam with one configured provider
+### Provider seam with one selected provider
 
-`BaseProvider` and a factory establish an extension boundary, while the
-factory currently creates only the Ollama provider. The interface should not
-be described as multi-provider support until additional adapters and
-conformance tests exist.
+`BaseProvider` and a factory establish an extension boundary. The factory
+supports Ollama and an OpenAI-compatible Chat Completions adapter, with one
+provider selected per server. The compatible adapter is non-streaming and
+supports only model listing and chat completions; it is not a general-purpose
+integration for every provider-specific API.
 
 ### Shared chat/session/workflow store, process-local execution controls
 

@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import shutil
 import tempfile
 from pathlib import Path, PurePosixPath
 from threading import Lock
@@ -16,6 +17,7 @@ _DIFF_FENCE = re.compile(r"```diff\s*\n(.*?)```", re.DOTALL)
 _HUNK_HEADER = re.compile(
     r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@"
 )
+_EXTERNAL_PROJECT_ID = re.compile(r"external-[0-9a-f]{32}")
 
 
 class CodingAgentError(Exception):
@@ -188,6 +190,68 @@ class CodingAgent:
                 "status": "pending",
             }
 
+    def _sync_persisted_state(self) -> None:
+        if self._persistence_store is None:
+            return
+
+        mode = self._persistence_store.get_coding_permission_mode()
+        if mode in ("manual", "auto"):
+            self._permission_mode = mode
+
+        persisted_ids: set[str] = set()
+        for record in self._persistence_store.list_coding_proposals():
+            proposal_id = record["id"]
+            status = record["status"]
+            snapshot = record["snapshot"]
+            owner_id = record["owner_id"]
+            if (
+                not isinstance(snapshot, dict)
+                or status not in ("pending", "applying")
+                or not self._is_identity_digest(owner_id)
+            ):
+                continue
+
+            persisted_ids.add(proposal_id)
+            changes = snapshot.get("changes")
+            originals = snapshot.get("originals")
+            files = snapshot.get("files")
+            if (
+                snapshot.get("workspace_root") != str(self.workspace_root)
+                or not isinstance(snapshot.get("proposal"), str)
+                or not isinstance(files, list)
+                or any(not isinstance(path, str) for path in files)
+                or not isinstance(snapshot.get("model"), str)
+                or snapshot.get("permission_mode") not in ("manual", "auto")
+                or not isinstance(changes, dict)
+                or not changes
+                or any(
+                    not isinstance(path, str)
+                    or not isinstance(content, str)
+                    for path, content in changes.items()
+                )
+                or not isinstance(originals, dict)
+                or set(changes) != set(originals)
+                or any(
+                    original is not None and not isinstance(original, str)
+                    for original in originals.values()
+                )
+            ):
+                continue
+
+            existing = self._proposals.get(proposal_id)
+            if existing is not None:
+                existing["status"] = status
+                continue
+            self._proposals[proposal_id] = {
+                **snapshot,
+                "owner_id": owner_id,
+                "status": status,
+            }
+
+        for proposal_id in list(self._proposals):
+            if proposal_id not in persisted_ids:
+                del self._proposals[proposal_id]
+
     @staticmethod
     def _require_persistent_identity(
         owner_id: str | None,
@@ -238,26 +302,135 @@ class CodingAgent:
             if (
                 path.is_symlink()
                 or not path.is_dir()
+                or _EXTERNAL_PROJECT_ID.fullmatch(path.name)
                 or path.name.lower() in self._EXCLUDED_DIRECTORIES
                 or path.name.startswith(".")
             ):
                 continue
             projects.append({"id": path.name, "name": path.name})
+        if self._persistence_store is not None:
+            for record in self._persistence_store.list_coding_projects():
+                projects.append(
+                    {
+                        "id": record["id"],
+                        "name": record["name"],
+                        "location": record["path"],
+                        "external": True,
+                    }
+                )
         return {"projects": projects}
 
-    def create_project(self, name: str) -> dict:
+    def list_directories(self, path: str | None = None) -> dict:
+        current = self._resolve_directory(path or str(Path.home()))
+        try:
+            directories = [
+                {"name": child.name, "path": str(child.resolve(strict=True))}
+                for child in sorted(
+                    current.iterdir(),
+                    key=lambda item: item.name.lower(),
+                )
+                if child.is_dir()
+                and not child.is_symlink()
+                and not child.name.startswith(".")
+                and child.name.lower() not in self._EXCLUDED_DIRECTORIES
+            ]
+        except OSError as exc:
+            status_code = 403 if isinstance(exc, PermissionError) else 503
+            raise CodingAgentError(
+                "DIRECTORY_UNAVAILABLE",
+                "Directories in the selected location could not be listed.",
+                status_code,
+            ) from exc
+
+        roots = (
+            [
+                f"{letter}:\\"
+                for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                if Path(f"{letter}:\\").is_dir()
+            ]
+            if os.name == "nt"
+            else [str(Path(current.anchor or "/"))]
+        )
+        parent = current.parent
+        return {
+            "current": str(current),
+            "parent": str(parent) if parent != current else None,
+            "roots": roots,
+            "directories": directories,
+        }
+
+    def create_project(
+        self,
+        name: str,
+        parent_path: str | None = None,
+    ) -> dict:
+        self._validate_project_name(name)
+        parent = (
+            self.workspace_root
+            if parent_path is None
+            else self._resolve_directory(parent_path)
+        )
+        project_path = parent / name
+        if parent == self.workspace_root:
+            return self._create_workspace_project(name, project_path)
+        try:
+            project_path.mkdir()
+        except FileExistsError as exc:
+            raise CodingAgentError(
+                "PROJECT_ALREADY_EXISTS",
+                "A project with that name already exists in the selected location.",
+                409,
+            ) from exc
+        except OSError as exc:
+            raise CodingAgentError(
+                "PROJECT_CREATE_FAILED",
+                "The project folder could not be created in the selected location.",
+                500,
+            ) from exc
+        registered = False
+        try:
+            result = self._register_external_project(project_path)
+            registered = True
+            return result
+        finally:
+            if not registered:
+                try:
+                    project_path.rmdir()
+                except OSError:
+                    logger.exception(
+                        "Could not remove an unregistered project directory"
+                    )
+
+    def import_project(self, path: str) -> dict:
+        project_path = self._resolve_directory(path)
         if (
-            not isinstance(name, str)
-            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._ -]{0,63}", name)
-            or name.endswith((".", " "))
-            or name.lower() in self._EXCLUDED_DIRECTORIES
+            not project_path.name
+            or project_path == Path(project_path.anchor)
+            or project_path.name.startswith(".")
+            or project_path.name.lower() in self._EXCLUDED_DIRECTORIES
         ):
             raise CodingAgentError(
-                "INVALID_PROJECT_NAME",
-                "Project names must be 1-64 safe letters, numbers, spaces, dots, underscores, or hyphens.",
+                "PROJECT_NOT_ALLOWED",
+                "Hidden and generated directories cannot be added as projects.",
                 400,
             )
-        project_path = self.workspace_root / name
+        try:
+            relative = project_path.relative_to(self.workspace_root)
+        except ValueError:
+            relative = None
+        if relative is not None:
+            if not relative.parts:
+                return {"id": ".", "name": "Workspace root"}
+            if len(relative.parts) == 1 and self._is_native_project_id(
+                relative.parts[0]
+            ):
+                return {
+                    "id": relative.parts[0],
+                    "name": relative.parts[0],
+                }
+        return self._register_external_project(project_path)
+
+    def _create_workspace_project(self, name: str, project_path: Path) -> dict:
         if project_path.is_symlink():
             raise CodingAgentError(
                 "UNSAFE_PROJECT_PATH",
@@ -278,7 +451,146 @@ class CodingAgent:
                 "The project folder could not be created.",
                 500,
             ) from exc
-        return {"id": name, "name": name}
+        return {
+            "id": name,
+            "name": name,
+        }
+
+    def _register_external_project(self, project_path: Path) -> dict:
+        if self._persistence_store is None:
+            raise CodingAgentError(
+                "PROJECT_REGISTRY_UNAVAILABLE",
+                "External projects require persistent project storage.",
+                503,
+            )
+        project_id = f"external-{uuid4().hex}"
+        record = self._persistence_store.register_coding_project(
+            project_id,
+            project_path.name,
+            str(project_path),
+        )
+        return {
+            "id": record["id"],
+            "name": record["name"],
+            "location": record["path"],
+            "external": True,
+        }
+
+    def _validate_project_name(self, name: str) -> None:
+        if (
+            not isinstance(name, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._ -]{0,63}", name)
+            or name.endswith((".", " "))
+            or name.lower() in self._EXCLUDED_DIRECTORIES
+            or _EXTERNAL_PROJECT_ID.fullmatch(name)
+        ):
+            raise CodingAgentError(
+                "INVALID_PROJECT_NAME",
+                "Project names must be 1-64 safe letters, numbers, spaces, dots, underscores, or hyphens.",
+                400,
+            )
+
+    def _resolve_directory(self, path: str) -> Path:
+        if (
+            not isinstance(path, str)
+            or not path.strip()
+            or len(path) > 4096
+        ):
+            raise CodingAgentError(
+                "INVALID_DIRECTORY_PATH",
+                "A valid absolute directory path is required.",
+                400,
+            )
+        try:
+            candidate = Path(path).expanduser()
+            if not candidate.is_absolute() or candidate.is_symlink():
+                raise ValueError("Directory path must be absolute and not a symbolic link.")
+            resolved = candidate.resolve(strict=True)
+            if not resolved.is_dir():
+                raise NotADirectoryError(path)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise CodingAgentError(
+                "DIRECTORY_NOT_FOUND",
+                "The selected directory does not exist or cannot be used.",
+                400,
+            ) from exc
+        return resolved
+
+    def _resolve_external_project(self, project_id: str) -> Path:
+        if self._persistence_store is None:
+            raise CodingAgentError(
+                "PROJECT_NOT_FOUND",
+                "The selected project is not available in this workspace.",
+                404,
+            )
+        record = self._persistence_store.get_coding_project(project_id)
+        if record is None:
+            raise CodingAgentError(
+                "PROJECT_NOT_FOUND",
+                "The selected project is not available in this workspace.",
+                404,
+            )
+        candidate = Path(record["path"])
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise CodingAgentError(
+                "PROJECT_NOT_FOUND",
+                "The selected project location is no longer available.",
+                404,
+            ) from exc
+        if (
+            candidate.is_symlink()
+            or resolved != candidate
+            or not resolved.is_dir()
+        ):
+            raise CodingAgentError(
+                "PROJECT_NOT_FOUND",
+                "The selected project location is no longer available.",
+                404,
+            )
+        return resolved
+
+    def delete_project(self, project_id: str) -> dict:
+        if project_id == ".":
+            raise CodingAgentError(
+                "ROOT_PROJECT_PROTECTED",
+                "The workspace root cannot be deleted.",
+                400,
+            )
+        if (
+            isinstance(project_id, str)
+            and _EXTERNAL_PROJECT_ID.fullmatch(project_id)
+        ):
+            if (
+                self._persistence_store is None
+                or not self._persistence_store.remove_coding_project(project_id)
+            ):
+                raise CodingAgentError(
+                    "PROJECT_NOT_FOUND",
+                    "The selected project is not available in this workspace.",
+                    404,
+                )
+            return {
+                "id": project_id,
+                "deleted": True,
+                "files_deleted": False,
+            }
+        with self._workspace_lock:
+            project_path = self._resolve_project(project_id)
+            try:
+                shutil.rmtree(project_path)
+            except OSError as exc:
+                raise CodingAgentError(
+                    "PROJECT_DELETE_FAILED",
+                    "The project folder could not be deleted.",
+                    500,
+                ) from exc
+        return {
+            "id": project_id,
+            "deleted": True,
+            "files_deleted": True,
+        }
 
     def list_files(self, project_id: str = ".") -> dict:
         project_root = self._resolve_project(project_id)
@@ -299,7 +611,7 @@ class CodingAgent:
             )
             for name in sorted(filenames):
                 path = current / name
-                if path.is_symlink() or not self._is_allowed(path):
+                if path.is_symlink() or not self._is_allowed(path, project_root):
                     continue
                 try:
                     if path.stat().st_size > self._MAX_FILE_BYTES:
@@ -311,7 +623,12 @@ class CodingAgent:
                         503,
                     ) from exc
 
-                files.append(path.relative_to(self.workspace_root).as_posix())
+                relative_path = path.relative_to(project_root).as_posix()
+                files.append(
+                    f"{project_id}/{relative_path}"
+                    if _EXTERNAL_PROJECT_ID.fullmatch(project_id)
+                    else path.relative_to(self.workspace_root).as_posix()
+                )
                 if len(files) > self._MAX_LISTED_FILES:
                     truncated = True
                     break
@@ -509,6 +826,7 @@ class CodingAgent:
 
     def permissions(self) -> dict:
         with self._permission_lock:
+            self._sync_persisted_state()
             mode = self._permission_mode
         return {
             "mode": mode,
@@ -520,6 +838,19 @@ class CodingAgent:
             "reset_on_restart": self._persistence_store is None,
         }
 
+    def list_audit_events(
+        self,
+        limit: int,
+        offset: int,
+    ) -> list[dict]:
+        if self._persistence_store is None:
+            raise CodingAgentError(
+                "CODING_AUDIT_UNAVAILABLE",
+                "Persistent coding audit storage is not configured.",
+                503,
+            )
+        return self._persistence_store.list_coding_audit(limit, offset)
+
     def list_proposals(self, owner_id: str) -> list[dict]:
         if not self._is_identity_digest(owner_id):
             raise CodingAgentError(
@@ -528,6 +859,7 @@ class CodingAgent:
                 401,
             )
         with self._permission_lock:
+            self._sync_persisted_state()
             return [
                 {
                     "proposal": proposal["proposal"],
@@ -565,6 +897,7 @@ class CodingAgent:
                 400,
             )
         with self._permission_lock:
+            self._sync_persisted_state()
             if self._persistence_store is not None:
                 self._require_persistent_identity(
                     None,
@@ -587,6 +920,7 @@ class CodingAgent:
         actor_id: str | None = None,
     ) -> dict:
         with self._permission_lock:
+            self._sync_persisted_state()
             proposal = self._proposals.get(proposal_id)
             if (
                 proposal is None
@@ -627,6 +961,7 @@ class CodingAgent:
         actor_id: str | None = None,
     ) -> dict:
         with self._permission_lock:
+            self._sync_persisted_state()
             proposal = self._proposals.get(proposal_id)
             if (
                 proposal is None
@@ -1144,7 +1479,11 @@ class CodingAgent:
                 if resolved_old is not None and current_source is None:
                     return "A diff may only modify selected workspace files."
                 if resolved_old is None:
-                    if (self.workspace_root / current_file).exists():
+                    try:
+                        candidate = self._project_file_path(current_file)
+                    except CodingAgentError as exc:
+                        return str(exc)
+                    if candidate.exists():
                         return "A diff cannot replace an unselected workspace file."
                     current_source = []
             else:
@@ -1279,7 +1618,11 @@ class CodingAgent:
                 if resolved_old is not None and current_original is None:
                     return {}, "A diff may only modify selected workspace files."
                 if resolved_old is None:
-                    if (self.workspace_root / current_file).exists():
+                    try:
+                        candidate = self._project_file_path(current_file)
+                    except CodingAgentError as exc:
+                        return {}, str(exc)
+                    if candidate.exists():
                         return {}, "A diff cannot replace an unselected workspace file."
                     current_source = []
                 else:
@@ -1314,8 +1657,9 @@ class CodingAgent:
         try:
             for relative_path, updated in sorted(changes.items()):
                 relative = PurePosixPath(relative_path)
-                parent = self.workspace_root
-                for part in relative.parts[:-1]:
+                project_root, parts = self._project_file_parts(relative)
+                parent = project_root
+                for part in parts[:-1]:
                     parent = parent / part
                     if parent.is_symlink():
                         raise CodingAgentError(
@@ -1331,7 +1675,7 @@ class CodingAgent:
                     )
                 try:
                     resolved_parent = parent.resolve(strict=True)
-                    resolved_parent.relative_to(self.workspace_root)
+                    resolved_parent.relative_to(project_root)
                 except (OSError, ValueError) as exc:
                     raise CodingAgentError(
                         "UNSAFE_WRITE_PATH",
@@ -1339,8 +1683,11 @@ class CodingAgent:
                         400,
                     ) from exc
 
-                target = resolved_parent / relative.parts[-1]
-                if not self._is_allowed(target) or target.is_symlink():
+                target = resolved_parent / parts[-1]
+                if (
+                    not self._is_allowed(target, project_root)
+                    or target.is_symlink()
+                ):
                     raise CodingAgentError(
                         "UNSAFE_WRITE_PATH",
                         "A proposed file path is not allowed.",
@@ -1563,19 +1910,28 @@ class CodingAgent:
         ):
             return None, "A diff path escapes the configured workspace."
         relative_path = relative.as_posix()
-        candidate = self.workspace_root.joinpath(*relative.parts)
+        try:
+            project_root, parts = self._project_file_parts(relative)
+        except CodingAgentError as exc:
+            return None, str(exc)
+        candidate = project_root.joinpath(*parts)
         try:
             resolved = candidate.resolve(strict=False)
-            resolved.relative_to(self.workspace_root)
+            resolved.relative_to(project_root)
         except (OSError, ValueError):
             return None, "A diff path escapes the configured workspace."
-        if not self._is_allowed(resolved):
+        if not self._is_allowed(resolved, project_root):
             return None, "A diff path is not an allowed source file."
         return relative_path, None
 
     def _resolve_project(self, project_id: str) -> Path:
         if project_id == ".":
             return self.workspace_root
+        if (
+            isinstance(project_id, str)
+            and _EXTERNAL_PROJECT_ID.fullmatch(project_id)
+        ):
+            return self._resolve_external_project(project_id)
         if (
             not isinstance(project_id, str)
             or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._ -]{0,63}", project_id)
@@ -1609,6 +1965,53 @@ class CodingAgent:
             )
         return resolved
 
+    @staticmethod
+    def _is_native_project_id(project_id: str) -> bool:
+        return (
+            isinstance(project_id, str)
+            and bool(
+                re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9._ -]{0,63}",
+                    project_id,
+                )
+            )
+            and not project_id.startswith(".")
+            and not _EXTERNAL_PROJECT_ID.fullmatch(project_id)
+        )
+
+    def _project_file_parts(
+        self,
+        relative: PurePosixPath,
+    ) -> tuple[Path, tuple[str, ...]]:
+        if not relative.parts or any(
+            part in ("", ".", "..") or ":" in part
+            for part in relative.parts
+        ):
+            raise CodingAgentError(
+                "INVALID_FILE_PATH",
+                "Workspace file paths must stay inside the selected project.",
+                400,
+            )
+        if (
+            relative.parts
+            and _EXTERNAL_PROJECT_ID.fullmatch(relative.parts[0])
+        ):
+            project_root = self._resolve_project(relative.parts[0])
+            parts = relative.parts[1:]
+            if not parts:
+                raise CodingAgentError(
+                    "INVALID_FILE_PATH",
+                    "A project file path must include a file name.",
+                    400,
+                )
+            return project_root, parts
+        return self.workspace_root, relative.parts
+
+    def _project_file_path(self, relative_path: str) -> Path:
+        relative = PurePosixPath(relative_path)
+        project_root, parts = self._project_file_parts(relative)
+        return project_root.joinpath(*parts)
+
     def _resolve_write_target(self, file_name: str) -> tuple[Path, str]:
         if not isinstance(file_name, str) or not file_name.strip():
             raise CodingAgentError(
@@ -1626,9 +2029,10 @@ class CodingAgent:
                 "Workspace file paths must stay inside the configured workspace.",
                 400,
             )
-        candidate = self.workspace_root.joinpath(*relative.parts)
-        current = self.workspace_root
-        for part in relative.parts[:-1]:
+        project_root, parts = self._project_file_parts(relative)
+        candidate = project_root.joinpath(*parts)
+        current = project_root
+        for part in parts[:-1]:
             current = current / part
             if current.is_symlink():
                 raise CodingAgentError(
@@ -1638,17 +2042,17 @@ class CodingAgent:
                 )
         try:
             resolved_parent = candidate.parent.resolve(strict=True)
-            resolved_parent.relative_to(self.workspace_root)
+            resolved_parent.relative_to(project_root)
         except (OSError, ValueError) as exc:
             raise CodingAgentError(
                 "UNSAFE_WRITE_PATH",
                 "The workspace file's parent must already exist inside the workspace.",
                 400,
             ) from exc
-        target = resolved_parent / relative.parts[-1]
+        target = resolved_parent / parts[-1]
         if (
             target.is_symlink()
-            or not self._is_allowed(target)
+            or not self._is_allowed(target, project_root)
             or (target.exists() and not target.is_file())
         ):
             raise CodingAgentError(
@@ -1678,9 +2082,10 @@ class CodingAgent:
                 400,
             )
 
-        candidate = self.workspace_root.joinpath(*relative.parts)
-        current = self.workspace_root
-        for part in relative.parts:
+        project_root, parts = self._project_file_parts(relative)
+        candidate = project_root.joinpath(*parts)
+        current = project_root
+        for part in parts:
             current = current / part
             if current.is_symlink():
                 raise CodingAgentError(
@@ -1690,7 +2095,7 @@ class CodingAgent:
                 )
         try:
             resolved = candidate.resolve(strict=True)
-            resolved_relative = resolved.relative_to(self.workspace_root)
+            resolved.relative_to(project_root)
         except (OSError, ValueError) as exc:
             raise CodingAgentError(
                 "FILE_NOT_FOUND",
@@ -1701,7 +2106,7 @@ class CodingAgent:
         if (
             not resolved.is_file()
             or resolved.is_symlink()
-            or not self._is_allowed(resolved)
+            or not self._is_allowed(resolved, project_root)
         ):
             raise CodingAgentError(
                 "FILE_NOT_ALLOWED",
@@ -1722,7 +2127,7 @@ class CodingAgent:
                 "Selected workspace files cannot exceed 32 KiB each.",
                 413,
             )
-        return resolved, resolved_relative.as_posix()
+        return resolved, relative.as_posix()
 
     @staticmethod
     def _read_text(path: Path) -> str:
@@ -1730,8 +2135,18 @@ class CodingAgent:
             return file.read()
 
     @classmethod
-    def _is_allowed(cls, path: Path) -> bool:
-        relative_parts = path.parts
+    def _is_allowed(
+        cls,
+        path: Path,
+        project_root: Path | None = None,
+    ) -> bool:
+        if project_root is None:
+            relative_parts = path.parts
+        else:
+            try:
+                relative_parts = path.relative_to(project_root).parts
+            except ValueError:
+                return False
         if any(part.lower() in cls._EXCLUDED_DIRECTORIES for part in relative_parts):
             return False
         basename = path.name.lower()

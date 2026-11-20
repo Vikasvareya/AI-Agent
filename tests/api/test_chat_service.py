@@ -1,3 +1,6 @@
+import sqlite3
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from app.chat.service import ChatError, ChatService
@@ -87,6 +90,150 @@ def test_chat_store_survives_reopen(tmp_path):
         assert restored["title"] == "Saved chat"
     finally:
         reopened_store.close()
+
+
+def test_chat_store_health_check_reports_database_availability(
+    tmp_path,
+    monkeypatch,
+):
+    store = ChatStore(tmp_path / "chat.sqlite3")
+    try:
+        assert store.health_check() is True
+
+        def unavailable_database(*_args, **_kwargs):
+            raise sqlite3.OperationalError("database unavailable")
+
+        monkeypatch.setattr("app.chat.store.sqlite3.connect", unavailable_database)
+        assert store.health_check() is False
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("retention_days", "expected_pruned", "expected_events"),
+    ((30, 1, 0), (0, 0, 1)),
+)
+def test_chat_store_applies_coding_audit_retention(
+    tmp_path,
+    retention_days,
+    expected_pruned,
+    expected_events,
+):
+    store = ChatStore(
+        tmp_path / "chat.sqlite3",
+        coding_audit_retention_days=retention_days,
+    )
+    try:
+        store.save_coding_permission_mode(
+            "manual",
+            "manual",
+            "a" * 64,
+        )
+        old_timestamp = (
+            datetime.now(timezone.utc) - timedelta(days=31)
+        ).isoformat()
+        with store._connection() as connection:
+            store._execute(
+                connection,
+                "UPDATE coding_audit SET created_at = ?",
+                (old_timestamp,),
+            )
+
+        assert store.prune_coding_audit() == expected_pruned
+        assert len(store.list_coding_audit()) == expected_events
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("retention_days", "expected_pruned", "expected_events"),
+    ((30, 1, 0), (0, 0, 1)),
+)
+def test_chat_store_applies_general_audit_retention(
+    tmp_path,
+    retention_days,
+    expected_pruned,
+    expected_events,
+):
+    store = ChatStore(
+        tmp_path / "chat.sqlite3",
+        audit_retention_days=retention_days,
+    )
+    try:
+        store.record_audit("a" * 64, "workflow_created", "wf-1", {})
+        old_timestamp = (
+            datetime.now(timezone.utc) - timedelta(days=31)
+        ).isoformat()
+        with store._connection() as connection:
+            store._execute(
+                connection,
+                "UPDATE audit_events SET created_at = ?",
+                (old_timestamp,),
+            )
+
+        assert store.prune_audit() == expected_pruned
+        assert len(store.list_audit()) == expected_events
+    finally:
+        store.close()
+
+
+def test_chat_store_distributed_rate_limit_is_shared(tmp_path):
+    store = ChatStore(tmp_path / "ratelimit.sqlite3")
+    try:
+        assert store.allow_distributed_request("203.0.113.10", 2, 60) is True
+        assert store.allow_distributed_request("203.0.113.10", 2, 60) is True
+        assert store.allow_distributed_request("203.0.113.10", 2, 60) is False
+        assert store.allow_distributed_request("203.0.113.11", 2, 60) is True
+    finally:
+        store.close()
+
+
+def test_chat_store_prunes_expired_credentials_and_old_rate_hits(tmp_path):
+    store = ChatStore(tmp_path / "cleanup.sqlite3")
+    try:
+        store.create_api_credential(
+            "old-expired",
+            "a" * 64,
+            "user",
+            "old-user",
+            (datetime.now(timezone.utc) - timedelta(days=31)).isoformat(),
+        )
+        store.create_api_credential(
+            "active",
+            "b" * 64,
+            "admin",
+            "active-admin",
+            (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        )
+        assert store.prune_api_credentials(30) == 1
+        assert store.get_api_credential("old-expired") is None
+        assert store.get_api_credential("active") is not None
+
+        assert store.allow_distributed_request("203.0.113.20", 100, 60) is True
+        old_timestamp = (
+            datetime.now(timezone.utc) - timedelta(hours=25)
+        ).isoformat()
+        with store._connection() as connection:
+            store._execute(
+                connection,
+                "UPDATE api_rate_limit_hits SET occurred_at = ?",
+                (old_timestamp,),
+            )
+        assert store.prune_api_rate_limit_hits(86_400) == 1
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("retention_days", (-1, 36_501))
+def test_chat_store_rejects_invalid_coding_audit_retention(
+    tmp_path,
+    retention_days,
+):
+    with pytest.raises(ValueError, match="between 0 and 36500"):
+        ChatStore(
+            tmp_path / "chat.sqlite3",
+            coding_audit_retention_days=retention_days,
+        )
 
 
 def test_coding_sessions_persist_context_and_revoke_shared_links(tmp_path):

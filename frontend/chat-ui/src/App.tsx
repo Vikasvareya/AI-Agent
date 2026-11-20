@@ -1,4 +1,22 @@
 import {
+  ArrowUp,
+  ChevronDown,
+  Code2,
+  ExternalLink,
+  GraduationCap,
+  Image,
+  Lightbulb,
+  Menu,
+  PenLine,
+  Plus,
+  RefreshCw,
+  Search,
+  Sparkles,
+  Trash2,
+  Video,
+  X,
+} from "lucide-react";
+import {
   FormEvent,
   KeyboardEvent,
   MouseEvent,
@@ -6,6 +24,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { useAppearance } from "./appearance";
 import CodingDashboard, { SharedCodingSession } from "./CodingDashboard";
 
 type Role = "user" | "assistant";
@@ -76,7 +95,11 @@ async function request<T>(
 }
 
 export default function App() {
-  const path = window.location.pathname;
+  const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
+  const pathname = window.location.pathname;
+  const path = basePath && pathname.startsWith(`${basePath}/`)
+    ? pathname.slice(basePath.length)
+    : pathname;
   const sharedSession = path.match(/^\/coding\/share\/([A-Za-z0-9_-]+)\/?$/);
   if (sharedSession) {
     return <SharedCodingSession token={sharedSession[1]} />;
@@ -88,6 +111,7 @@ export default function App() {
 }
 
 function ChatApp() {
+  const { appearance, effectiveTheme } = useAppearance();
   const [session, setSession] = useState<Session>("guest");
   const [token, setToken] = useState("");
   const [tokenDraft, setTokenDraft] = useState("");
@@ -124,7 +148,6 @@ function ChatApp() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-
   useEffect(() => {
     void initialize();
   }, []);
@@ -500,7 +523,15 @@ function ChatApp() {
   }
 
   return (
-    <div className="app-shell">
+    <div
+      className="app-shell"
+      data-theme={effectiveTheme}
+      data-contrast={appearance.contrast}
+      data-font={appearance.font}
+      data-font-size={appearance.fontSize}
+      data-density={appearance.density}
+      data-reduce-motion={appearance.reduceMotion}
+    >
       {sidebarOpen && (
         <button
           className="sidebar-scrim"
@@ -510,17 +541,17 @@ function ChatApp() {
       )}
       <aside className={`sidebar ${sidebarOpen ? "open" : ""}`}>
         <div className="brand">
-          <div className="brand-mark">✦</div>
+          <div className="brand-mark"><Sparkles size={17} aria-hidden="true" /></div>
           <div>
             <strong>Agent</strong>
             <span>Workspace</span>
           </div>
           <a className="control-link" href="/" title="Open workflow control plane">
-            ↗
+            <ExternalLink size={15} aria-hidden="true" />
           </a>
         </div>
         <button className="new-chat" onClick={() => void createConversation()}>
-          <span>＋</span> New chat
+          <Plus size={16} aria-hidden="true" /> New chat
         </button>
         <div className="history-label">YOUR CHATS</div>
         <nav className="conversation-list" aria-label="Conversations">
@@ -539,7 +570,7 @@ function ChatApp() {
                 title="Delete chat"
                 onClick={event => void deleteConversation(event, conversation.id)}
               >
-                ×
+                <Trash2 size={14} aria-hidden="true" />
               </button>
             </div>
           ))}
@@ -566,13 +597,16 @@ function ChatApp() {
             aria-label="Open conversation menu"
             onClick={() => setSidebarOpen(true)}
           >
-            ☰
+            <Menu size={18} aria-hidden="true" />
           </button>
           <div className="model-label">
-            <span className="status-dot" /> AI Agent <span className="chevron">⌄</span>
+            <span className="status-dot" /> AI Agent <ChevronDown className="chevron-icon" size={14} aria-hidden="true" />
           </div>
           <div className="top-actions">
-            <a className="coding-workspace-link" href="/coding/">
+            <a
+              className="coding-workspace-link"
+              href={`${import.meta.env.BASE_URL}coding/`}
+            >
               Coding workspace
             </a>
             <button
@@ -593,7 +627,7 @@ function ChatApp() {
         {error && (
           <div className="error-banner" role="alert">
             <span>{error}</span>
-            <button aria-label="Dismiss error" onClick={() => setError("")}>×</button>
+            <button aria-label="Dismiss error" onClick={() => setError("")}><X size={15} aria-hidden="true" /></button>
           </div>
         )}
 
@@ -604,19 +638,19 @@ function ChatApp() {
             </div>
           ) : messages.length === 0 ? (
             <div className="welcome">
-              <div className="welcome-symbol">✦</div>
+              <div className="welcome-symbol"><Sparkles size={28} aria-hidden="true" /></div>
               <p className="eyebrow">YOUR AI WORKSPACE</p>
               <h1>What can I help with?</h1>
               <p className="welcome-note">Ask a question, explore an idea, or start with one of these.</p>
               <div className="suggestions">
                 <button onClick={() => setInput("Explain a complex topic in simple terms")}>
-                  <span>✧</span><strong>Learn something</strong><small>Break down any topic</small>
+                  <GraduationCap size={17} aria-hidden="true" /><strong>Learn something</strong><small>Break down any topic</small>
                 </button>
                 <button onClick={() => setInput("Help me brainstorm ideas for a project")}>
-                  <span>⌘</span><strong>Explore an idea</strong><small>Think through a challenge</small>
+                  <Lightbulb size={17} aria-hidden="true" /><strong>Explore an idea</strong><small>Think through a challenge</small>
                 </button>
                 <button onClick={() => setInput("Help me write a clear, professional message")}>
-                  <span>✎</span><strong>Write something</strong><small>Draft, edit, or improve text</small>
+                  <PenLine size={17} aria-hidden="true" /><strong>Write something</strong><small>Draft, edit, or improve text</small>
                 </button>
               </div>
             </div>
@@ -625,7 +659,7 @@ function ChatApp() {
               {messages.map(message => (
                 <article className={`message ${message.role}`} key={message.id}>
                   <div className={`message-avatar ${message.role}`}>
-                    {message.role === "assistant" ? "✦" : "Y"}
+                    {message.role === "assistant" ? <Sparkles size={14} aria-hidden="true" /> : "Y"}
                   </div>
                   <div className="message-content">
                     <div className="message-author">
@@ -637,7 +671,7 @@ function ChatApp() {
               ))}
               {sending && (
                 <article className="message assistant">
-                  <div className="message-avatar assistant">✦</div>
+                  <div className="message-avatar assistant"><Sparkles size={14} aria-hidden="true" /></div>
                   <div className="message-content">
                     <div className="message-author">AI Agent</div>
                     <div className="thinking"><i /><i /><i /></div>
@@ -658,7 +692,7 @@ function ChatApp() {
                   className={`mode-option ${mode === "chat" ? "active" : ""}`}
                   onClick={() => setMode("chat")}
                 >
-                  <span>◉</span> Chat
+                  <span><Sparkles size={13} aria-hidden="true" /></span> Chat
                 </button>
                 <button
                   type="button"
@@ -666,14 +700,14 @@ function ChatApp() {
                   disabled={!capabilities.coding?.available}
                   onClick={() => setMode("coding")}
                 >
-                  <span>{"</>"}</span> Coding
+                  <span><Code2 size={13} aria-hidden="true" /></span> Coding
                 </button>
                 <span
                   className="unavailable-mode"
                   title={capabilities.image?.reason || "No image provider is configured."}
                 >
                   <button type="button" className="mode-option" disabled>
-                    <span>▧</span> Image
+                    <span><Image size={13} aria-hidden="true" /></span> Image
                   </button>
                   <small>Not configured</small>
                 </span>
@@ -682,7 +716,7 @@ function ChatApp() {
                   title={capabilities.video?.reason || "No video provider is configured."}
                 >
                   <button type="button" className="mode-option" disabled>
-                    <span>▶</span> Video
+                    <span><Video size={13} aria-hidden="true" /></span> Video
                   </button>
                   <small>Not configured</small>
                 </span>
@@ -722,7 +756,7 @@ function ChatApp() {
                   disabled={modelLoading}
                   onClick={() => void refreshModels(token, true)}
                 >
-                  {modelLoading ? "…" : "↻"}
+                  {modelLoading ? "…" : <RefreshCw size={13} aria-hidden="true" />}
                 </button>
               </div>
             </div>
@@ -738,6 +772,7 @@ function ChatApp() {
                 disabled={!capabilities.web_search?.available || sending}
                 onChange={event => setWebSearchEnabled(event.target.checked)}
               />
+              <Search size={12} aria-hidden="true" />
               <span>Search the web</span>
               <small>
                 {capabilities.web_search?.available
@@ -779,7 +814,7 @@ function ChatApp() {
                   disabled={!input.trim() || sending || loading}
                   aria-label="Send message"
                 >
-                  {sending ? "…" : "↑"}
+                  {sending ? "…" : <ArrowUp size={16} aria-hidden="true" />}
                 </button>
               </div>
             </div>
@@ -795,8 +830,8 @@ function ChatApp() {
           }}
         >
           <section className="account-modal" aria-labelledby="account-title">
-            <button className="modal-close" onClick={() => setAccountOpen(false)} aria-label="Close">×</button>
-            <div className="welcome-symbol small">✦</div>
+            <button className="modal-close" onClick={() => setAccountOpen(false)} aria-label="Close"><X size={16} aria-hidden="true" /></button>
+            <div className="welcome-symbol small"><Sparkles size={22} aria-hidden="true" /></div>
             <h2 id="account-title">{session === "guest" ? "Connect your account" : "Account"}</h2>
             <p>Sign in with the user or administrator token provided by your workspace operator to use your account chat history.</p>
             <form onSubmit={event => void signIn(event)}>

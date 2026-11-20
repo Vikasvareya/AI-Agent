@@ -580,6 +580,81 @@ def test_persisted_coding_proposal_permission_and_audit_survive_restart(
         third_store.close()
 
 
+def test_live_coding_agents_sync_permission_and_proposal_state(tmp_path):
+    workspace = tmp_path / "workspace"
+    (workspace / "src").mkdir(parents=True)
+    source_file = workspace / "src" / "app.py"
+    source_file.write_text(
+        "def greet():\n    return 'hello'\n",
+        encoding="utf-8",
+    )
+    database_path = tmp_path / "coding.sqlite3"
+    owner_id = hashlib.sha256(b"coding:owner").hexdigest()
+    actor_id = hashlib.sha256(b"coding:actor").hexdigest()
+    first_store = ChatStore(database_path)
+    second_store = ChatStore(database_path)
+    try:
+        provider = FakeProvider()
+        provider.responses = [
+            (
+                "Summary\n```diff\n"
+                "diff --git a/src/app.py b/src/app.py\n"
+                "--- a/src/app.py\n"
+                "+++ b/src/app.py\n"
+                "@@ -1,2 +1,2 @@\n"
+                " def greet():\n"
+                "-    return 'hello'\n"
+                "+    return 'Hello'\n"
+                "```"
+            )
+        ]
+        first_agent = CodingAgent(
+            provider,
+            workspace,
+            persistence_store=first_store,
+        )
+        second_agent = CodingAgent(
+            FakeProvider(),
+            workspace,
+            persistence_store=second_store,
+        )
+
+        proposal = first_agent.propose(
+            "Update the greeting.",
+            ["src/app.py"],
+            owner_id=owner_id,
+            actor_id=actor_id,
+        )
+        first_agent.set_permission_mode(
+            "auto",
+            confirm_auto_apply=True,
+            actor_id=actor_id,
+        )
+        assert second_agent.permissions()["mode"] == "auto"
+        assert [
+            item["proposal_id"]
+            for item in second_agent.list_proposals(owner_id)
+        ] == [proposal["proposal_id"]]
+
+        rejected = second_agent.reject_proposal(
+            proposal["proposal_id"],
+            owner_id=owner_id,
+            actor_id=actor_id,
+        )
+        assert rejected["status"] == "rejected"
+        assert first_agent.list_proposals(owner_id) == []
+        with pytest.raises(CodingAgentError) as error:
+            first_agent.reject_proposal(
+                proposal["proposal_id"],
+                owner_id=owner_id,
+                actor_id=actor_id,
+            )
+        assert error.value.code == "PROPOSAL_NOT_FOUND"
+    finally:
+        first_store.close()
+        second_store.close()
+
+
 def test_restart_does_not_replay_a_proposal_mid_apply(tmp_path):
     workspace = tmp_path / "workspace"
     (workspace / "src").mkdir(parents=True)
@@ -628,7 +703,7 @@ def test_restart_does_not_replay_a_proposal_mid_apply(tmp_path):
         assert source_file.read_text(encoding="utf-8") == (
             "def greet():\n    return 'hello'\n"
         )
-        assert second_store.list_coding_audit()[-1]["action"] == (
+        assert second_store.list_coding_audit()[0]["action"] == (
             "proposal_apply_interrupted"
         )
     finally:

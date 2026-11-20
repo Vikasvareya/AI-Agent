@@ -5,7 +5,8 @@
 The repository includes a local Python service, Dockerfile, Docker Compose
 configuration, and Kubernetes examples. These examples do not establish an
 SLO, high availability, production security, or heavy-traffic capacity.
-Kubernetes expects external PostgreSQL and Ollama services. REST workflow
+Kubernetes expects external PostgreSQL and a model-provider endpoint (Ollama
+by default). REST workflow
 definitions and run snapshots use `ChatStore`, but execution, event delivery,
 and rate limiting are not coordinated across API instances.
 
@@ -20,8 +21,10 @@ python -m app.api.server_main
 ```
 
 Defaults are API port `8081` and health port `8080`. The API bind address and
-ports are environment-configurable. The service needs a reachable Ollama
-instance; chat persistence uses SQLite by default unless PostgreSQL is
+ports are environment-configurable. Ollama is the default model provider; use
+`AI_AGENT_PROVIDER=openai_compatible` with the `OPENAI_COMPATIBLE_*` settings
+to select an OpenAI-compatible Chat Completions endpoint. Chat persistence uses
+SQLite by default unless PostgreSQL is
 configured. See [API and Developer Guide](./API_AND_DEVELOPER_GUIDE.md).
 
 The API entry point allows unauthenticated development only on a loopback
@@ -33,6 +36,7 @@ put real secrets in that example.
 ## Docker Compose
 
 Compose builds the frontend and runs the API, PostgreSQL, and Ollama services.
+Ollama remains running even when the OpenAI-compatible provider is selected.
 Supply unique credentials and database configuration through a secret manager
 or deployment environment; never copy live secrets into a checked-in file.
 Ollama models are not automatically downloaded. Chat, coding, and workflow UI
@@ -44,7 +48,7 @@ remember that selected files can be sent to the configured model provider.
 
 ## Kubernetes
 
-The manifests are illustrative. Configure external PostgreSQL, Ollama
+The manifests are illustrative. Configure external PostgreSQL, model-provider
 connectivity, secret delivery, image registry access, ingress/TLS, storage,
 and cluster-specific policy before applying them. Review all manifest values
 without copying secret contents into docs or source control.
@@ -61,10 +65,12 @@ this state.
 
 ## Health and operations
 
-The health service exposes liveness/readiness routes and `/metrics`. The
-current metrics response is a static up gauge; it is not application-level
-telemetry or an alerting integration. Confirm the exact checks in
-`app/health/` before using them as deployment gates.
+The health service exposes liveness/readiness routes and `/metrics`. Readiness
+checks the configured chat database and model-provider endpoint, returning 503
+with dependency statuses when either is unavailable. It does not verify that
+the configured model is installed or can generate a response. The current
+metrics response is a static up gauge; it is not application-level telemetry
+or an alerting integration.
 
 Before production use, define:
 
@@ -79,8 +85,9 @@ Before production use, define:
 
 ## Verification status
 
-The project has previously passed its Python test suite and frontend
-production build, but this documentation update does not validate container
-images or deploy the Kubernetes examples. See
+CI validates the Compose configuration, builds the application container,
+checks the Kubernetes manifests against Kubernetes 1.32 schemas, and starts the
+Compose stack until its database and Ollama dependencies report ready. It does
+not deploy to Kubernetes or verify model inference. See
 [Testing and Quality](./TESTING_AND_QUALITY.md) for verification commands and
 known gaps.

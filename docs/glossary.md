@@ -11,8 +11,8 @@
   workspace-scoped application.
 - **MCP:** Model Context Protocol; this repository contains JSON-RPC-style
   protocol building blocks but no built-in transport integration.
-- **Provider:** Adapter that sends model requests; Ollama is the only provider
-  currently instantiated by the factory.
+- **Provider:** Adapter that sends model requests; the factory supports Ollama
+  and an OpenAI-compatible Chat Completions endpoint.
 - **RAG:** Retrieval-augmented generation; the current pipeline is connected
   to the CLI path, not API chat.
 - **Workflow:** DAG of nodes executed by the in-process workflow engine.

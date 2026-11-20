@@ -1,5 +1,7 @@
 from threading import Lock
 from time import monotonic
+from urllib.error import URLError
+from urllib.request import urlopen
 
 from ollama import Client, ResponseError
 from app.config.providers.ollama_settings import OllamaSettings
@@ -81,6 +83,16 @@ class OllamaProvider(BaseProvider):
             self._models = sorted(models, key=lambda model: model["id"].lower())
             self._models_loaded_at = monotonic()
             return [model.copy() for model in self._models]
+
+    def health_check(self, timeout: float = 2.0) -> bool:
+        try:
+            with urlopen(
+                f"{self.settings.host.rstrip('/')}/",
+                timeout=timeout,
+            ) as response:
+                return response.status == 200
+        except (URLError, TimeoutError, OSError):
+            return False
 
     def ask(
         self,

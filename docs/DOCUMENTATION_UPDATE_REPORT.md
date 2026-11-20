@@ -27,7 +27,9 @@ than deleted.
 
 ## Verified implementation boundaries
 
-- Ollama is the only provider instantiated by the factory.
+- At the time of this documentation audit, Ollama was the only provider
+  instantiated by the factory; the current implementation also supports the
+  OpenAI-compatible Chat Completions adapter.
 - Workflow execution and several runtime controls remain process-local.
   REST workflow definitions/run snapshots and coding proposals/permission
   state now persist through `ChatStore`; the engine has no distributed worker

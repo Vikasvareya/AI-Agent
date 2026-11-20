@@ -1,0 +1,118 @@
+:root {
+  color-scheme: dark;
+  --ui-page: #0e1117;
+  --ui-sidebar: #11161e;
+  --ui-panel: #151a22;
+  --ui-panel-raised: #191f29;
+  --ui-line: #28313d;
+  --ui-text: #e8edf5;
+  --ui-secondary: #b4bac5;
+  --ui-muted: #929eae;
+  --ui-accent: #aa91ff;
+  --ui-green: #75d7ae;
+  --ui-error: #ffc0c5;
+  --ui-text-scale: 1;
+}
+
+.app-shell[data-theme="light"],
+.coding-app[data-theme="light"],
+.coding-shared-page[data-theme="light"] {
+  color-scheme: light;
+  --ui-page: #f3f4f7;
+  --ui-sidebar: #f0f1f4;
+  --ui-panel: #ffffff;
+  --ui-panel-raised: #e7e8ee;
+  --ui-line: #d7d9e0;
+  --ui-text: #24252b;
+  --ui-secondary: #555963;
+  --ui-muted: #666873;
+  --ui-accent: #7256b5;
+  --ui-green: #277753;
+  --ui-error: #8d2937;
+}
+
+.app-shell[data-contrast="high"],
+.coding-app[data-contrast="high"],
+.coding-shared-page[data-contrast="high"] {
+  --ui-secondary: #e4e6ed;
+  --ui-muted: #d3d5de;
+  --ui-line: #596273;
+}
+
+.app-shell[data-theme="light"][data-contrast="high"],
+.coding-app[data-theme="light"][data-contrast="high"],
+.coding-shared-page[data-theme="light"][data-contrast="high"] {
+  --ui-secondary: #343640;
+  --ui-muted: #454750;
+  --ui-line: #858894;
+}
+
+.app-shell[data-font="system"],
+.coding-app[data-font="system"],
+.coding-shared-page[data-font="system"] {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.app-shell[data-font="mono"],
+.coding-app[data-font="mono"],
+.coding-shared-page[data-font="mono"] {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.app-shell[data-font-size="12"],
+.coding-app[data-font-size="12"],
+.coding-shared-page[data-font-size="12"] { --ui-text-scale: .86; }
+.app-shell[data-font-size="14"],
+.coding-app[data-font-size="14"],
+.coding-shared-page[data-font-size="14"] { --ui-text-scale: 1; }
+.app-shell[data-font-size="16"],
+.coding-app[data-font-size="16"],
+.coding-shared-page[data-font-size="16"] { --ui-text-scale: 1.14; }
+.app-shell[data-font-size="18"],
+.coding-app[data-font-size="18"],
+.coding-shared-page[data-font-size="18"] { --ui-text-scale: 1.29; }
+
+.app-shell[data-font-size] .message-text,
+.app-shell[data-font-size] .composer textarea {
+  font-size: calc(14px * var(--ui-text-scale));
+}
+
+.app-shell[data-font-size] .conversation-item,
+.app-shell[data-font-size] .new-chat,
+.app-shell[data-font-size] .mode-option,
+.app-shell[data-font-size] .model-control select {
+  font-size: calc(12px * var(--ui-text-scale));
+}
+
+.coding-shared-page[data-font-size] .coding-shared-content h1 {
+  font-size: calc(23px * var(--ui-text-scale));
+}
+.coding-shared-page[data-font-size] .coding-shared-content > p,
+.coding-shared-page[data-font-size] .coding-shared-empty p,
+.coding-shared-page[data-font-size] .coding-shared-message pre {
+  font-size: calc(12px * var(--ui-text-scale));
+}
+.coding-shared-page[data-font-size] > header {
+  font-size: calc(12px * var(--ui-text-scale));
+}
+
+.coding-app[data-font-size] {
+  --cd-text-scale: var(--ui-text-scale);
+}
+
+.app-shell[data-density="compact"] .message { margin-bottom: 14px; }
+
+.app-shell[data-reduce-motion="true"] *,
+.app-shell[data-reduce-motion="true"] *::before,
+.app-shell[data-reduce-motion="true"] *::after,
+.coding-app[data-reduce-motion="true"] *,
+.coding-app[data-reduce-motion="true"] *::before,
+.coding-app[data-reduce-motion="true"] *::after,
+.coding-shared-page[data-reduce-motion="true"] *,
+.coding-shared-page[data-reduce-motion="true"] *::before,
+.coding-shared-page[data-reduce-motion="true"] *::after {
+  scroll-behavior: auto !important;
+  animation-duration: .01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: .01ms !important;
+}

@@ -16,20 +16,28 @@ required controls.
   server configuration, and proposal decisions are audited with hashed actor
   identities. An apply interrupted during restart is invalidated, not
   replayed. Permission updates are not synchronized to already-running
-  replicas; audit retention and a read/export API are not implemented.
-- Event subscribers and rate-limit state remain in process memory.
-- The IP rate limiter is not distributed; concurrent replicas do not share
-  its counters.
+  replicas. Live coding-agent instances now reconcile permission and pending
+  proposal state from `ChatStore`, so decisions use the shared durable state.
+  Coding audit events have one-year retention by default (set
+  `AI_AGENT_CODING_AUDIT_RETENTION_DAYS=0` to disable pruning) and bounded
+  admin query APIs. General audit retention defaults to 365 days and is
+  configurable with `AI_AGENT_AUDIT_RETENTION_DAYS=0` to disable pruning;
+  coverage is expanding beyond workflow and coding actions.
+- Event subscribers remain in process memory.
+- When `ChatStore` is configured, IP counters use the shared database; standalone
+  servers without `ChatStore` still use process-local counters.
 - PostgreSQL persists chat/session and REST-workflow records; its connection
   pool is per-process and capped at 20. The database does not coordinate
   workers or make multi-replica execution safe.
 - Health `/metrics` returns a static up gauge rather than comprehensive
-  application telemetry.
+  application telemetry. Readiness checks database and configured provider
+  endpoint reachability but does not check model availability or inference.
 - No load, soak, failover, or chaos evidence establishes production capacity.
 
 ## Models, agents, and retrieval
 
-- Ollama is the only provider created by the provider factory.
+- Provider factory supports Ollama and an OpenAI-compatible Chat Completions
+  API. Other provider-specific APIs and streaming are not implemented.
 - Planner intent selection is largely rule/registry based. ReAct and
   reflective agents are bounded prototypes, not general model-driven
   autonomous reasoning.
@@ -42,14 +50,16 @@ required controls.
 
 ## Coding workspace and integrations
 
-- The coding workspace is admin-only and confined to a configured root and
-  direct child projects. Files/context are bounded; see
+- The coding workspace is admin-only and operates on the configured root,
+  direct child projects, or explicitly selected server directories.
+  Files/context are bounded; see
   [coding-agent-workspace.md](./coding-agent-workspace.md) for exact limits.
 - No shell, command, or arbitrary code execution is available.
 - API-created proposal and permission state is stored in `ChatStore`;
   standalone `CodingAgent` instances without a store remain process-local.
   Auto-apply is workspace-limited and its permission changes/applications are
-  audited, but there is no audit retention policy or query API.
+  audited; there is no separate CSV export or retention policy for other event
+  types.
 - Plugins import Python code in-process; no sandbox or signed registry exists.
 - MCP has protocol building blocks but no built-in stdio/HTTP transport and is
   not invoked by the coding agent.
@@ -70,8 +80,8 @@ required controls.
   potentially exposed credentials.
 - Kubernetes and Docker assets are examples, not evidence of a hardened
   production deployment.
-- CI currently runs backend tests and the frontend build only; there is no
-  secret scanner, container build, Kubernetes validation, or load test job.
+- CI validates secrets, builds and smoke-tests the Compose app, and validates
+  Kubernetes manifests, but does not deploy to a cluster or run load tests.
 - There is no generated OpenAPI specification or supported SDK.
 - License metadata is inconsistent: README previously said MIT, but no
   top-level `LICENSE` file was found during this audit. Confirm licensing

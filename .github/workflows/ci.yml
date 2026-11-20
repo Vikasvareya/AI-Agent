@@ -8,6 +8,65 @@ permissions:
   contents: read
 
 jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Install Gitleaks
+        run: |
+          curl --fail --location --silent --show-error \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+            --output gitleaks.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks.tar.gz" | sha256sum --check
+          tar -xzf gitleaks.tar.gz gitleaks
+          chmod +x gitleaks
+      - name: Scan Git history for secrets
+        run: ./gitleaks git --redact --no-banner --log-level error --log-opts="--all" .
+
+  deployment-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      AI_AGENT_ADMIN_TOKEN: ci-admin-token
+      AI_AGENT_USER_TOKEN: ci-user-token
+      AI_AGENT_DB_PASSWORD: ci-database-password
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate Docker Compose configuration
+        run: docker compose config --quiet
+      - name: Build application container
+        run: docker compose build ai-agent
+      - name: Install kubeconform
+        run: |
+          curl --fail --location --silent --show-error \
+            https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz \
+            --output kubeconform.tar.gz
+          echo "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883  kubeconform.tar.gz" | sha256sum --check
+          tar -xzf kubeconform.tar.gz kubeconform
+          chmod +x kubeconform
+      - name: Validate Kubernetes manifests
+        run: ./kubeconform -strict -summary -kubernetes-version 1.32.0 deploy/kubernetes
+      - name: Start Compose stack
+        run: docker compose up --detach --no-build
+      - name: Wait for dependency readiness
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent --output /dev/null http://127.0.0.1:8080/health/ready; then
+              echo "Application dependencies are ready."
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose ps
+          docker compose logs --no-color ai-agent postgres ollama
+          exit 1
+      - name: Stop Compose stack
+        if: always()
+        run: docker compose down --volumes --remove-orphans
+
   backend:
     runs-on: ubuntu-latest
     timeout-minutes: 15

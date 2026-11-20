@@ -1,2 +1,3 @@
 from .base_provider_settings import BaseProviderSettings
+from .openai_compatible_settings import OpenAICompatibleSettings
 from .ollama_settings import OllamaSettings

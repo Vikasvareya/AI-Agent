@@ -15,16 +15,19 @@ example Compose/Kubernetes manifests.
 health behavior is documented; security-sensitive routes and filesystem
 boundaries have regression coverage.
 
-**Remaining:** resolve secret hygiene, increase test/CI discipline, establish
-reproducible deployment validation, and document supported environments.
+**Remaining:** review credential exposure in Git history and rotate
+potentially exposed values, continue extending audit coverage to remaining
+privileged actions, and document supported environments.
 
 **Progress in the current worktree:** the API now defaults to loopback binding
 and refuses non-loopback binding unless auth and a token are configured.
 Tracked `.env` removal is staged and the local file is preserved/ignored.
 Review and rotate any credentials already present in repository history;
-the index change does not rewrite history. A basic hosted CI workflow now runs
-backend tests and the frontend build; secret scanning and deployment validation
-remain.
+the index change does not rewrite history. Hosted CI now runs backend tests,
+the frontend build, a full-history Gitleaks scan (which currently reports no
+findings), Compose config/container build validation, a Compose startup smoke
+test against database/Ollama readiness, and Kubernetes manifest schema
+validation. Cluster deployment and model-inference testing remain.
 
 ## P0 — Secure baseline and single-instance reliability
 
@@ -48,10 +51,12 @@ restore, and credential rotation.
 
 **Depends on:** P0 identity, security, and database decisions.
 
-- Extend durable audit coverage, define retention/export controls, and add
-  audit query tooling. The server now persists coding proposals, permission
-  mode, and coding action records; REST workflow definitions/run snapshots
-  also persist through `ChatStore`, while Python callable workflows do not.
+- Extend durable audit coverage and formalize export/retention controls for
+  every event class. Coding audit records can now be inspected through a
+  bounded admin API and are retained for 365 days by default. The server
+  persists coding proposals, permission mode, and coding action records; REST
+  workflow definitions/run snapshots also persist through `ChatStore`, while
+  Python callable workflows do not.
 - Add a durable queue/worker boundary and cross-process coordination with
   cancellation and retry semantics; restart snapshots alone do not enable
   horizontal execution.

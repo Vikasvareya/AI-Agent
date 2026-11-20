@@ -2,6 +2,19 @@ from typing import Protocol
 
 
 class CodingAgentPersistenceStore(Protocol):
+    def list_coding_projects(self) -> list[dict]: ...
+
+    def register_coding_project(
+        self,
+        project_id: str,
+        name: str,
+        path: str,
+    ) -> dict: ...
+
+    def get_coding_project(self, project_id: str) -> dict | None: ...
+
+    def remove_coding_project(self, project_id: str) -> bool: ...
+
     def get_coding_permission_mode(self) -> str | None: ...
 
     def save_coding_permission_mode(
@@ -48,4 +61,8 @@ class CodingAgentPersistenceStore(Protocol):
         details: dict,
     ) -> bool: ...
 
-    def list_coding_audit(self) -> list[dict]: ...
+    def list_coding_audit(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict]: ...

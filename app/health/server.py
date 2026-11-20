@@ -1,23 +1,41 @@
 import json
 import os
+from collections.abc import Callable, Mapping
+from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Event, Thread
 
 
 class HealthHandler(BaseHTTPRequestHandler):
+    def __init__(
+        self,
+        *args,
+        readiness_checks: Mapping[str, Callable[[], bool]],
+        **kwargs,
+    ):
+        self.readiness_checks = readiness_checks
+        super().__init__(*args, **kwargs)
+
     def do_GET(self):
         if self.path in ("/health/live", "/healthz"):
             self._send_json(200, {"status": "live"})
             return
 
         if self.path in ("/health/ready", "/ready"):
-            ready = os.getenv(
-                "AI_AGENT_READY",
-                "true",
-            ).lower() in ("1", "true", "yes")
+            dependencies = {
+                name: "available" if check() else "unavailable"
+                for name, check in self.readiness_checks.items()
+            }
+            ready = all(
+                status == "available"
+                for status in dependencies.values()
+            )
             self._send_json(
                 200 if ready else 503,
-                {"status": "ready" if ready else "not_ready"},
+                {
+                    "status": "ready" if ready else "not_ready",
+                    "dependencies": dependencies,
+                },
             )
             return
 
@@ -57,12 +75,21 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 
 class HealthServer:
-    def __init__(self, host: str = "0.0.0.0", port: int = 8080):
+    def __init__(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 8080,
+        readiness_checks: Mapping[str, Callable[[], bool]] | None = None,
+    ):
         self.host = host
         self.port = port
+        self.readiness_checks = dict(readiness_checks or {})
         self._server = ThreadingHTTPServer(
             (host, port),
-            HealthHandler,
+            partial(
+                HealthHandler,
+                readiness_checks=self.readiness_checks,
+            ),
         )
         self._thread: Thread | None = None
 

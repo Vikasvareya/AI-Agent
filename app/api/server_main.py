@@ -98,7 +98,52 @@ def main() -> None:
         "AI_AGENT_CHAT_DATABASE",
         str(Path("data") / "chat.sqlite3"),
     )
-    store = ChatStore(database_path)
+    retention_value = os.getenv("AI_AGENT_CODING_AUDIT_RETENTION_DAYS", "365")
+    try:
+        coding_audit_retention_days = int(retention_value)
+    except ValueError as exc:
+        raise ValueError(
+            "AI_AGENT_CODING_AUDIT_RETENTION_DAYS must be a non-negative integer."
+        ) from exc
+    audit_retention_value = os.getenv(
+        "AI_AGENT_AUDIT_RETENTION_DAYS",
+        "365",
+    )
+    try:
+        audit_retention_days = int(audit_retention_value)
+    except ValueError as exc:
+        raise ValueError(
+            "AI_AGENT_AUDIT_RETENTION_DAYS must be a non-negative integer."
+        ) from exc
+    store = ChatStore(
+        database_path,
+        coding_audit_retention_days=coding_audit_retention_days,
+        audit_retention_days=audit_retention_days,
+    )
+    store.prune_coding_audit()
+    store.prune_audit()
+    credential_retention_value = os.getenv(
+        "AI_AGENT_CREDENTIAL_RETENTION_DAYS",
+        "30",
+    )
+    try:
+        credential_retention_days = int(credential_retention_value)
+    except ValueError as exc:
+        raise ValueError(
+            "AI_AGENT_CREDENTIAL_RETENTION_DAYS must be a non-negative integer."
+        ) from exc
+    rate_hit_retention_value = os.getenv(
+        "AI_AGENT_RATE_LIMIT_HIT_RETENTION_SECONDS",
+        "86400",
+    )
+    try:
+        rate_hit_retention_seconds = int(rate_hit_retention_value)
+    except ValueError as exc:
+        raise ValueError(
+            "AI_AGENT_RATE_LIMIT_HIT_RETENTION_SECONDS must be a non-negative integer."
+        ) from exc
+    store.prune_api_credentials(credential_retention_days)
+    store.prune_api_rate_limit_hits(rate_hit_retention_seconds)
     api, bus = create_demo_api(store)
     chat_service = ChatService(
         store,
@@ -120,6 +165,14 @@ def main() -> None:
         if coding_workspace
         else None
     )
+    allowed_origins = tuple(
+        origin.strip()
+        for origin in os.getenv(
+            "AI_AGENT_ALLOWED_ORIGINS",
+            "",
+        ).split(",")
+        if origin.strip()
+    )
 
     server = WorkflowHTTPServer(
         api,
@@ -135,10 +188,15 @@ def main() -> None:
             default=False,
         ),
         require_auth=require_auth,
+        allowed_origins=allowed_origins,
     )
     health_server = HealthServer(
         host=os.getenv("AI_AGENT_HOST", "0.0.0.0"),
         port=int(os.getenv("AI_AGENT_PORT", "8080")),
+        readiness_checks={
+            "database": store.health_check,
+            provider.provider_name: provider.health_check,
+        },
     )
 
     server.start()

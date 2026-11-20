@@ -6,12 +6,15 @@ import hmac
 import mimetypes
 import re
 import secrets
+import csv
+import io
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock, Thread
 from urllib.parse import parse_qs, unquote, urlparse
+from uuid import uuid4
 
 from app.agents.coding_agent import CodingAgent, CodingAgentError
 from app.api.security_config import validate_api_auth
@@ -78,6 +81,7 @@ class WorkflowHTTPServer:
         chat_service: ChatService | None = None,
         coding_agent: CodingAgent | None = None,
         secure_guest_cookies: bool = False,
+        allowed_origins: tuple[str, ...] = (),
     ):
         self.api = api
         self.event_bus = event_bus
@@ -106,6 +110,11 @@ class WorkflowHTTPServer:
         self.chat_service = chat_service
         self.coding_agent = coding_agent
         self.secure_guest_cookies = secure_guest_cookies
+        self.allowed_origins = tuple(
+            origin.rstrip("/")
+            for origin in allowed_origins
+            if origin.strip()
+        )
         self.rate_limiter = rate_limiter or APIRateLimiter()
         self._thread: Thread | None = None
         self._stopped = False
@@ -123,6 +132,9 @@ class WorkflowHTTPServer:
 
             def do_DELETE(handler):
                 owner.handle_request(handler)
+
+            def do_OPTIONS(handler):
+                owner.handle_options(handler)
 
             def log_message(handler, format, *args):
                 return
@@ -159,9 +171,28 @@ class WorkflowHTTPServer:
         self,
         handler: BaseHTTPRequestHandler,
     ) -> None:
-        if not self.rate_limiter.allow(
-            handler.client_address[0],
-        ):
+        if not self._origin_allowed(handler):
+            if not self._discard_request_body(handler):
+                return
+            self._send_json(
+                handler,
+                403,
+                {
+                    "code": "ORIGIN_NOT_ALLOWED",
+                    "message": "This request origin is not allowed.",
+                },
+            )
+            return
+        client_id = handler.client_address[0]
+        if self.chat_service is not None:
+            allowed = self.chat_service.store.allow_distributed_request(
+                client_id,
+                self.rate_limiter.max_requests,
+                self.rate_limiter.window_seconds,
+            )
+        else:
+            allowed = self.rate_limiter.allow(client_id)
+        if not allowed:
             if not self._discard_request_body(handler):
                 return
             self._send_json(
@@ -216,6 +247,18 @@ class WorkflowHTTPServer:
 
         principal = self._authenticate(handler)
 
+        if (
+            handler.command == "GET"
+            and (
+                path == "/chat"
+                or path.startswith("/chat/")
+                or path == "/coding"
+                or path.startswith("/coding/")
+            )
+        ):
+            self._serve_chat(handler, path)
+            return
+
         try:
             if (
                 handler.command == "POST"
@@ -245,7 +288,12 @@ class WorkflowHTTPServer:
                 )
             elif (
                 handler.command == "GET"
-                and (path == "/chat" or path.startswith("/chat/"))
+                and (
+                    path == "/chat"
+                    or path.startswith("/chat/")
+                    or path == "/coding"
+                    or path.startswith("/coding/")
+                )
             ):
                 self._serve_chat(handler, path)
             elif path.startswith("/v1/chat/"):
@@ -402,6 +450,22 @@ class WorkflowHTTPServer:
                     )
                 if (
                     handler.command == "GET"
+                    and path == "/v1/coding/directories"
+                ):
+                    if self.coding_agent is None:
+                        raise CodingAgentError(
+                            "CODING_AGENT_UNAVAILABLE",
+                            "The project coding agent is not configured.",
+                            503,
+                        )
+                    directory_path = parse_qs(parsed.query).get("path", [None])[0]
+                    self._send_json(
+                        handler,
+                        200,
+                        self.coding_agent.list_directories(directory_path),
+                    )
+                elif (
+                    handler.command == "GET"
                     and path == "/v1/coding/projects"
                 ):
                     if self.coding_agent is None:
@@ -426,10 +490,82 @@ class WorkflowHTTPServer:
                             503,
                         )
                     body = self._read_json(handler)
+                    project = self.coding_agent.create_project(
+                        body.get("name"),
+                        parent_path=body.get("parent_path"),
+                    )
+                    self._record_audit(
+                        principal,
+                        "coding_project_created",
+                        project.get("id"),
+                        {"location": project.get("location")},
+                    )
                     self._send_json(
                         handler,
                         201,
-                        self.coding_agent.create_project(body.get("name")),
+                        project,
+                    )
+                elif (
+                    handler.command == "POST"
+                    and path == "/v1/coding/projects/import"
+                ):
+                    if self.coding_agent is None:
+                        raise CodingAgentError(
+                            "CODING_AGENT_UNAVAILABLE",
+                            "The project coding agent is not configured.",
+                            503,
+                        )
+                    body = self._read_json(handler)
+                    project = self.coding_agent.import_project(body.get("path"))
+                    self._record_audit(
+                        principal,
+                        "coding_project_imported",
+                        project.get("id"),
+                        {"location": project.get("location")},
+                    )
+                    self._send_json(handler, 200, project)
+                elif (
+                    handler.command == "DELETE"
+                    and len(path.split("/")) == 5
+                    and path.startswith("/v1/coding/projects/")
+                ):
+                    if self.coding_agent is None:
+                        raise CodingAgentError(
+                            "CODING_AGENT_UNAVAILABLE",
+                            "The project coding agent is not configured.",
+                            503,
+                        )
+                    project_id = unquote(path.split("/")[4])
+                    deleted_project = self.coding_agent.delete_project(
+                        project_id
+                    )
+                    deleted_sessions = (
+                        self.chat_service.store.delete_coding_sessions_for_project(
+                            project_id,
+                            self._coding_owner(principal),
+                        )
+                        if self.chat_service is not None
+                        else 0
+                    )
+                    self._record_audit(
+                        principal,
+                        "coding_project_deleted",
+                        project_id,
+                        {
+                            "deleted_conversations": deleted_sessions,
+                            "files_deleted": deleted_project.get(
+                                "files_deleted",
+                                False,
+                            ),
+                        },
+                    )
+                    self._send_json(
+                        handler,
+                        200,
+                        {
+                            **deleted_project,
+                            "deleted_conversations": deleted_sessions,
+                        },
                     )
                 elif (
                     handler.command == "GET"
@@ -491,15 +627,24 @@ class WorkflowHTTPServer:
                             503,
                         )
                     body = self._read_json(handler)
+                    result = self.coding_agent.write_file(
+                        body.get("path"),
+                        body.get("content"),
+                        expected_content=body.get("expected_content"),
+                        create=body.get("create", False),
+                    )
+                    self._record_audit(
+                        principal,
+                        "coding_file_written",
+                        body.get("path"),
+                        {
+                            "create": body.get("create", False),
+                        },
+                    )
                     self._send_json(
                         handler,
                         200,
-                        self.coding_agent.write_file(
-                            body.get("path"),
-                            body.get("content"),
-                            expected_content=body.get("expected_content"),
-                            create=body.get("create", False),
-                        ),
+                        result,
                     )
                 elif (
                     handler.command == "GET"
@@ -539,6 +684,49 @@ class WorkflowHTTPServer:
                         handler,
                         200,
                         self.coding_agent.permissions(),
+                    )
+                elif (
+                    handler.command == "GET"
+                    and path == "/v1/coding/audit"
+                ):
+                    if self.coding_agent is None:
+                        raise CodingAgentError(
+                            "CODING_AGENT_UNAVAILABLE",
+                            "The project coding agent is not configured.",
+                            503,
+                        )
+                    query = parse_qs(
+                        parsed.query,
+                        keep_blank_values=True,
+                    )
+                    limit = self._audit_query_integer(
+                        query,
+                        "limit",
+                        default=50,
+                        minimum=1,
+                        maximum=100,
+                    )
+                    offset = self._audit_query_integer(
+                        query,
+                        "offset",
+                        default=0,
+                        minimum=0,
+                        maximum=10_000,
+                    )
+                    events = self.coding_agent.list_audit_events(
+                        limit + 1,
+                        offset,
+                    )
+                    has_more = len(events) > limit
+                    self._send_json(
+                        handler,
+                        200,
+                        {
+                            "events": events[:limit],
+                            "limit": limit,
+                            "offset": offset,
+                            "has_more": has_more,
+                        },
                     )
                 elif (
                     handler.command == "GET"
@@ -600,6 +788,12 @@ class WorkflowHTTPServer:
                         project_id,
                         title.strip(),
                     )
+                    self._record_audit(
+                        principal,
+                        "coding_session_created",
+                        session["id"],
+                        {"project_id": project_id},
+                    )
                     self._send_json(handler, 201, {**session, "messages": []})
                 elif (
                     handler.command == "GET"
@@ -623,6 +817,39 @@ class WorkflowHTTPServer:
                             404,
                         )
                     self._send_json(handler, 200, session)
+                elif (
+                    handler.command == "DELETE"
+                    and len(path.split("/")) == 5
+                    and path.startswith("/v1/coding/sessions/")
+                ):
+                    if self.chat_service is None:
+                        raise CodingAgentError(
+                            "CODING_SESSION_UNAVAILABLE",
+                            "Coding session storage is not configured.",
+                            503,
+                        )
+                    session_id = unquote(path.split("/")[4])
+                    if not self.chat_service.store.delete_coding_session(
+                        self._coding_owner(principal),
+                        session_id,
+                        self._coding_owner(principal),
+                    ):
+                        raise CodingAgentError(
+                            "SESSION_NOT_FOUND",
+                            "The coding conversation was not found.",
+                            404,
+                        )
+                    self._record_audit(
+                        principal,
+                        "coding_session_deleted",
+                        session_id,
+                        {},
+                    )
+                    self._send_json(
+                        handler,
+                        200,
+                        {"id": session_id, "deleted": True},
+                    )
                 elif (
                     handler.command == "POST"
                     and len(path.split("/")) == 6
@@ -653,6 +880,12 @@ class WorkflowHTTPServer:
                             "The coding session was not found.",
                             404,
                         )
+                    self._record_audit(
+                        principal,
+                        "coding_session_shared",
+                        session_id,
+                        {"expires_at": expires_at},
+                    )
                     self._send_json(
                         handler,
                         201,
@@ -674,6 +907,12 @@ class WorkflowHTTPServer:
                         self._coding_owner(principal),
                         unquote(path.split("/")[4]),
                     )
+                    self._record_audit(
+                        principal,
+                        "coding_session_shares_revoked",
+                        unquote(path.split("/")[4]),
+                        {"revoked": share_count},
+                    )
                     self._send_json(handler, 200, {"revoked": share_count})
                 elif (
                     handler.command == "POST"
@@ -686,17 +925,18 @@ class WorkflowHTTPServer:
                             503,
                         )
                     body = self._read_json(handler)
+                    result = self.coding_agent.set_permission_mode(
+                        body.get("mode"),
+                        confirm_auto_apply=body.get(
+                            "confirm_auto_apply",
+                            False,
+                        ),
+                        actor_id=self._coding_owner(principal),
+                    )
                     self._send_json(
                         handler,
                         200,
-                        self.coding_agent.set_permission_mode(
-                            body.get("mode"),
-                            confirm_auto_apply=body.get(
-                                "confirm_auto_apply",
-                                False,
-                            ),
-                            actor_id=self._coding_owner(principal),
-                        ),
+                        result,
                     )
                 elif (
                     handler.command == "GET"
@@ -893,6 +1133,407 @@ class WorkflowHTTPServer:
                     200,
                     {"status": "ok"},
                 )
+            elif handler.command == "GET" and path == "/v1/audit":
+                if principal[0] != "admin":
+                    raise APIError(
+                        "FORBIDDEN",
+                        "Only administrators can inspect audit events.",
+                        403,
+                    )
+                if self.chat_service is None:
+                    raise APIError(
+                        "AUDIT_UNAVAILABLE",
+                        "Audit event storage is not configured.",
+                        503,
+                    )
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                limit = self._audit_query_integer(
+                    query,
+                    "limit",
+                    default=50,
+                    minimum=1,
+                    maximum=100,
+                )
+                offset = self._audit_query_integer(
+                    query,
+                    "offset",
+                    default=0,
+                    minimum=0,
+                    maximum=10_000,
+                )
+                action_values = query.get("action", [])
+                action = action_values[0] if len(action_values) == 1 else None
+                if len(action_values) > 1:
+                    raise APIError(
+                        "INVALID_AUDIT_QUERY",
+                        "The action filter must appear once.",
+                        400,
+                    )
+                if action is not None and (
+                    not action.strip()
+                    or len(action) > 128
+                ):
+                    raise APIError(
+                        "INVALID_AUDIT_QUERY",
+                        "The action filter must contain 1-128 characters.",
+                        400,
+                    )
+                events = self.chat_service.store.list_audit(
+                    limit + 1,
+                    offset,
+                    action,
+                )
+                self._send_json(
+                    handler,
+                    200,
+                    {
+                        "events": events[:limit],
+                        "limit": limit,
+                        "offset": offset,
+                        "has_more": len(events) > limit,
+                    },
+                )
+            elif handler.command == "GET" and path == "/v1/audit/summary":
+                if principal[0] != "admin":
+                    raise APIError(
+                        "FORBIDDEN",
+                        "Only administrators can inspect audit summaries.",
+                        403,
+                    )
+                if self.chat_service is None:
+                    raise APIError(
+                        "AUDIT_UNAVAILABLE",
+                        "Audit event storage is not configured.",
+                        503,
+                    )
+                events = self.chat_service.store.list_audit(1000)
+                action_counts: dict[str, int] = {}
+                for event in events:
+                    action = event["action"]
+                    action_counts[action] = action_counts.get(action, 0) + 1
+                sensitive_actions = (
+                    "api_credential_created",
+                    "api_credential_rotated",
+                    "api_credential_revoked",
+                    "coding_permission_mode_set",
+                    "workflow_approval_decided",
+                )
+                sensitive_events = [
+                    event
+                    for event in events
+                    if event["action"] in sensitive_actions
+                ]
+                self._send_json(
+                    handler,
+                    200,
+                    {
+                        "events_scanned": len(events),
+                        "action_counts": action_counts,
+                        "sensitive_event_count": len(sensitive_events),
+                        "security_alert": len(sensitive_events) > 0,
+                        "sensitive_events": sensitive_events[:50],
+                    },
+                )
+            elif handler.command == "GET" and path == "/v1/audit/export":
+                if principal[0] != "admin":
+                    raise APIError(
+                        "FORBIDDEN",
+                        "Only administrators can export audit events.",
+                        403,
+                    )
+                if self.chat_service is None:
+                    raise APIError(
+                        "AUDIT_UNAVAILABLE",
+                        "Audit event storage is not configured.",
+                        503,
+                    )
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                limit = self._audit_query_integer(
+                    query,
+                    "limit",
+                    default=100,
+                    minimum=1,
+                    maximum=1000,
+                )
+                action_values = query.get("action", [])
+                action = action_values[0] if len(action_values) == 1 else None
+                if len(action_values) > 1:
+                    raise APIError(
+                        "INVALID_AUDIT_QUERY",
+                        "The action filter must appear once.",
+                        400,
+                    )
+                format_values = query.get("format", ["json"])
+                if len(format_values) != 1 or format_values[0] not in ("json", "csv"):
+                    raise APIError(
+                        "INVALID_AUDIT_FORMAT",
+                        "Audit export format must be 'json' or 'csv'.",
+                        400,
+                    )
+                events = self.chat_service.store.list_audit(
+                    limit,
+                    0,
+                    action,
+                )
+                if format_values[0] == "json":
+                    body = json.dumps(
+                        events,
+                        indent=2,
+                        sort_keys=True,
+                    ).encode("utf-8")
+                    content_type = "application/json"
+                    filename = "audit-events.json"
+                else:
+                    buffer = io.StringIO(newline="")
+                    writer = csv.DictWriter(
+                        buffer,
+                        fieldnames=[
+                            "id",
+                            "actor_id",
+                            "action",
+                            "resource_id",
+                            "details",
+                            "created_at",
+                        ],
+                    )
+                    writer.writeheader()
+                    for event in events:
+                        writer.writerow({
+                            **event,
+                            "details": json.dumps(
+                                event["details"],
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                        })
+                    body = buffer.getvalue().encode("utf-8")
+                    content_type = "text/csv"
+                    filename = "audit-events.csv"
+                self._send_export(
+                    handler,
+                    body,
+                    content_type,
+                    filename,
+                )
+            elif handler.command == "GET" and path == "/v1/auth/credentials":
+                if principal[0] != "admin":
+                    raise APIError(
+                        "FORBIDDEN",
+                        "Only administrators can inspect credentials.",
+                        403,
+                    )
+                if self.chat_service is None:
+                    raise APIError(
+                        "CREDENTIAL_STORAGE_UNAVAILABLE",
+                        "Credential storage is not configured.",
+                        503,
+                    )
+                now = datetime.now(timezone.utc).isoformat()
+                credentials = []
+                for credential in self.chat_service.store.list_api_credentials():
+                    if credential["revoked_at"] is not None:
+                        status = "revoked"
+                    elif credential["expires_at"] <= now:
+                        status = "expired"
+                    else:
+                        status = "active"
+                    credentials.append({
+                        "id": credential["id"],
+                        "role": credential["role"],
+                        "subject": credential["subject"],
+                        "expires_at": credential["expires_at"],
+                        "revoked_at": credential["revoked_at"],
+                        "created_at": credential["created_at"],
+                        "status": status,
+                    })
+                self._send_json(
+                    handler,
+                    200,
+                    {"credentials": credentials},
+                )
+            elif handler.command == "POST" and path == "/v1/auth/credentials":
+                if principal[0] != "admin":
+                    raise APIError(
+                        "FORBIDDEN",
+                        "Only administrators can create credentials.",
+                        403,
+                    )
+                if self.chat_service is None:
+                    raise APIError(
+                        "CREDENTIAL_STORAGE_UNAVAILABLE",
+                        "Credential storage is not configured.",
+                        503,
+                    )
+                body = self._read_json(handler)
+                role = body.get("role")
+                subject = body.get("subject")
+                ttl_seconds = body.get("ttl_seconds", 30 * 24 * 60 * 60)
+                if role not in ("admin", "user"):
+                    raise APIError(
+                        "INVALID_CREDENTIAL_ROLE",
+                        "Credential role must be 'admin' or 'user'.",
+                        400,
+                    )
+                if not isinstance(subject, str) or not subject.strip():
+                    raise APIError(
+                        "INVALID_CREDENTIAL_SUBJECT",
+                        "Credential subject must be a non-empty string.",
+                        400,
+                    )
+                if (
+                    isinstance(ttl_seconds, bool)
+                    or not isinstance(ttl_seconds, int)
+                    or not 300 <= ttl_seconds <= 365 * 24 * 60 * 60
+                ):
+                    raise APIError(
+                        "INVALID_CREDENTIAL_TTL",
+                        "Credential TTL must be between 300 and 31536000 seconds.",
+                        400,
+                    )
+                token = secrets.token_urlsafe(32)
+                credential_id = str(uuid4())
+                expires_at = (
+                    datetime.now(timezone.utc)
+                    + timedelta(seconds=ttl_seconds)
+                ).isoformat()
+                credential = self.chat_service.store.create_api_credential(
+                    credential_id,
+                    hashlib.sha256(token.encode("utf-8")).hexdigest(),
+                    role,
+                    subject.strip(),
+                    expires_at,
+                )
+                self._record_audit(
+                    principal,
+                    "api_credential_created",
+                    credential_id,
+                    {"role": role, "subject": subject.strip()},
+                )
+                self._send_json(
+                    handler,
+                    201,
+                    {
+                        **credential,
+                        "token": token,
+                    },
+                )
+            elif (
+                handler.command == "POST"
+                and path.startswith("/v1/auth/credentials/")
+                and path.endswith("/rotate")
+            ):
+                if principal[0] != "admin":
+                    raise APIError(
+                        "FORBIDDEN",
+                        "Only administrators can rotate credentials.",
+                        403,
+                    )
+                if self.chat_service is None:
+                    raise APIError(
+                        "CREDENTIAL_STORAGE_UNAVAILABLE",
+                        "Credential storage is not configured.",
+                        503,
+                    )
+                credential_id = unquote(path.split("/")[4])
+                old = self.chat_service.store.get_api_credential(
+                    credential_id
+                )
+                if old is None or old["revoked_at"] is not None:
+                    raise APIError(
+                        "CREDENTIAL_NOT_FOUND",
+                        "The credential was not found or is revoked.",
+                        404,
+                    )
+                body = self._read_json(handler)
+                ttl_seconds = body.get("ttl_seconds", 30 * 24 * 60 * 60)
+                if (
+                    isinstance(ttl_seconds, bool)
+                    or not isinstance(ttl_seconds, int)
+                    or not 300 <= ttl_seconds <= 365 * 24 * 60 * 60
+                ):
+                    raise APIError(
+                        "INVALID_CREDENTIAL_TTL",
+                        "Credential TTL must be between 300 and 31536000 seconds.",
+                        400,
+                    )
+                token = secrets.token_urlsafe(32)
+                new_id = str(uuid4())
+                expires_at = (
+                    datetime.now(timezone.utc)
+                    + timedelta(seconds=ttl_seconds)
+                ).isoformat()
+                new_credential = self.chat_service.store.create_api_credential(
+                    new_id,
+                    hashlib.sha256(token.encode("utf-8")).hexdigest(),
+                    old["role"],
+                    old["subject"],
+                    expires_at,
+                )
+                if not self.chat_service.store.revoke_api_credential(
+                    credential_id
+                ):
+                    raise APIError(
+                        "CREDENTIAL_NOT_FOUND",
+                        "The credential was not found or is already revoked.",
+                        404,
+                    )
+                self._record_audit(
+                    principal,
+                    "api_credential_rotated",
+                    new_id,
+                    {
+                        "replaced_id": credential_id,
+                        "role": old["role"],
+                        "subject": old["subject"],
+                    },
+                )
+                self._send_json(
+                    handler,
+                    201,
+                    {
+                        **new_credential,
+                        "token": token,
+                        "replaced_id": credential_id,
+                    },
+                )
+            elif (
+                handler.command == "DELETE"
+                and path.startswith("/v1/auth/credentials/")
+            ):
+                if principal[0] != "admin":
+                    if not self._discard_request_body(handler):
+                        return
+                    raise APIError(
+                        "FORBIDDEN",
+                        "Only administrators can revoke credentials.",
+                        403,
+                    )
+                if self.chat_service is None:
+                    raise APIError(
+                        "CREDENTIAL_STORAGE_UNAVAILABLE",
+                        "Credential storage is not configured.",
+                        503,
+                    )
+                credential_id = unquote(path.split("/")[4])
+                if not self.chat_service.store.revoke_api_credential(
+                    credential_id
+                ):
+                    raise APIError(
+                        "CREDENTIAL_NOT_FOUND",
+                        "The credential was not found or is already revoked.",
+                        404,
+                    )
+                self._record_audit(
+                    principal,
+                    "api_credential_revoked",
+                    credential_id,
+                    {},
+                )
+                self._send_json(
+                    handler,
+                    200,
+                    {"revoked": True, "id": credential_id},
+                )
             elif handler.command == "GET" and path == "/v1/workflows":
                 self._send_json(
                     handler,
@@ -924,6 +1565,12 @@ class WorkflowHTTPServer:
                     )
                 workflow = self.api.create_workflow(
                     self._read_json(handler),
+                )
+                self._record_audit(
+                    principal,
+                    "workflow_created",
+                    workflow.get("id"),
+                    {"name": workflow.get("name")},
                 )
                 self._send_json(handler, 201, workflow)
             elif (
@@ -982,6 +1629,12 @@ class WorkflowHTTPServer:
                     context=body.get("context"),
                     owner_id=self._workflow_owner(principal),
                 )
+                self._record_audit(
+                    principal,
+                    "workflow_run_created",
+                    result.get("id"),
+                    {"workflow_id": workflow_id},
+                )
                 self._send_json(handler, 201, result)
             elif (
                 handler.command == "POST"
@@ -1004,10 +1657,17 @@ class WorkflowHTTPServer:
                         f"Workflow run '{run_id}' was not found.",
                         404,
                     )
+                result = self.api.cancel_run(run_id)
+                self._record_audit(
+                    principal,
+                    "workflow_run_cancelled",
+                    run_id,
+                    {},
+                )
                 self._send_json(
                     handler,
                     200,
-                    self.api.cancel_run(run_id),
+                    result,
                 )
             elif (
                 handler.command == "POST"
@@ -1034,6 +1694,15 @@ class WorkflowHTTPServer:
                     node_name,
                     approved=body["approved"],
                     approver=principal[0],
+                )
+                self._record_audit(
+                    principal,
+                    "workflow_approval_decided",
+                    run_id,
+                    {
+                        "node": node_name,
+                        "approved": body["approved"],
+                    },
                 )
                 self._send_json(handler, 200, result)
             else:
@@ -1097,6 +1766,51 @@ class WorkflowHTTPServer:
     ) -> bool:
         return self._authenticate(handler) is not None
 
+    def handle_options(
+        self,
+        handler: BaseHTTPRequestHandler,
+    ) -> None:
+        origin = handler.headers.get("Origin")
+        if not self._origin_allowed(handler):
+            self._send_json(
+                handler,
+                403,
+                {
+                    "code": "ORIGIN_NOT_ALLOWED",
+                    "message": "This request origin is not allowed.",
+                },
+            )
+            return
+        headers: dict[str, str] = {}
+        if origin:
+            headers["Access-Control-Allow-Origin"] = origin
+            headers["Vary"] = "Origin"
+        headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+        headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+        headers["Access-Control-Max-Age"] = "600"
+        handler.send_response(204)
+        handler.send_header("Content-Length", "0")
+        for name, value in headers.items():
+            handler.send_header(name, value)
+        handler.end_headers()
+
+    def _origin_allowed(
+        self,
+        handler: BaseHTTPRequestHandler,
+    ) -> bool:
+        origin = handler.headers.get("Origin")
+        if not origin:
+            return True
+        normalized = origin.rstrip("/")
+        if normalized in self.allowed_origins:
+            return True
+        host = handler.headers.get("Host", "")
+        try:
+            origin_host = urlparse(normalized).netloc
+        except ValueError:
+            return False
+        return bool(origin_host and origin_host == host)
+
     def _authenticate(
         self,
         handler: BaseHTTPRequestHandler,
@@ -1115,6 +1829,13 @@ class WorkflowHTTPServer:
             return None
 
         token = authorization[len("Bearer "):]
+        if self.chat_service is not None:
+            token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+            credential = self.chat_service.store.authenticate_api_credential(
+                token_hash
+            )
+            if credential is not None:
+                return credential
         if self.api_token and hmac.compare_digest(
             token,
             self.api_token,
@@ -1161,6 +1882,56 @@ class WorkflowHTTPServer:
         return hashlib.sha256(
             f"workflow:{principal[0]}:{principal[1]}".encode("utf-8")
         ).hexdigest()
+
+    def _record_audit(
+        self,
+        principal: tuple[str, str],
+        action: str,
+        resource_id: str | None,
+        details: dict,
+    ) -> None:
+        if self.chat_service is None:
+            return
+        actor_id = hashlib.sha256(
+            f"actor:{principal[0]}:{principal[1]}".encode("utf-8")
+        ).hexdigest()
+        self.chat_service.store.record_audit(
+            actor_id,
+            action,
+            resource_id,
+            details,
+        )
+
+    @staticmethod
+    def _audit_query_integer(
+        query: dict[str, list[str]],
+        name: str,
+        *,
+        default: int,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        values = query.get(name)
+        if values is None:
+            return default
+        if (
+            len(values) != 1
+            or not values[0].isascii()
+            or not values[0].isdecimal()
+        ):
+            raise APIError(
+                "INVALID_AUDIT_QUERY",
+                f"{name} must be a single integer.",
+                400,
+            )
+        value = int(values[0])
+        if not minimum <= value <= maximum:
+            raise APIError(
+                "INVALID_AUDIT_QUERY",
+                f"{name} must be between {minimum} and {maximum}.",
+                400,
+            )
+        return value
 
     def _propose_coding_change(
         self,
@@ -1288,6 +2059,13 @@ class WorkflowHTTPServer:
     ) -> None:
         body = json.dumps(payload).encode("utf-8")
         handler.send_response(status)
+        origin = handler.headers.get("Origin")
+        if origin and self._origin_allowed(handler):
+            handler.send_header(
+                "Access-Control-Allow-Origin",
+                origin,
+            )
+            handler.send_header("Vary", "Origin")
         handler.send_header(
             "Content-Type",
             "application/json",
@@ -1302,6 +2080,30 @@ class WorkflowHTTPServer:
         handler.end_headers()
         handler.wfile.write(body)
 
+    def _send_export(
+        self,
+        handler: BaseHTTPRequestHandler,
+        body: bytes,
+        content_type: str,
+        filename: str,
+    ) -> None:
+        handler.send_response(200)
+        handler.send_header(
+            "Content-Type",
+            f"{content_type}; charset=utf-8",
+        )
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header(
+            "Content-Disposition",
+            f'attachment; filename="{filename}"',
+        )
+        handler.send_header(
+            "Content-Length",
+            str(len(body)),
+        )
+        handler.end_headers()
+        handler.wfile.write(body)
+
     def _serve_chat(
         self,
         handler: BaseHTTPRequestHandler,
@@ -1313,8 +2115,9 @@ class WorkflowHTTPServer:
             / "dist"
         ).resolve()
         if (
-            path in ("/chat", "/coding")
+            path in ("/chat", "/coding", "/chat/coding")
             or path.startswith("/coding/share/")
+            or path.startswith("/chat/coding/share/")
         ):
             asset_path = build_root / "index.html"
         else:

@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 import urllib.error
 import urllib.request
 
@@ -66,6 +67,64 @@ def test_http_health_and_run_creation():
             run = json.loads(response.read())
             assert response.status == 201
             assert run["status"] == "completed"
+    finally:
+        server.stop()
+
+
+def test_http_origin_policy_allows_same_origin_and_configured_origins():
+    bus = EventBus()
+    api = WorkflowAPIService(WorkflowEngine(event_bus=bus))
+    server = WorkflowHTTPServer(
+        api,
+        bus,
+        host="127.0.0.1",
+        port=0,
+        allowed_origins=("https://console.example.test",),
+    )
+    server.start()
+    port = server._server.server_address[1]
+
+    try:
+        same_origin = urllib.request.Request(
+            f"http://127.0.0.1:{port}/health",
+            headers={"Origin": f"http://127.0.0.1:{port}"},
+        )
+        with urllib.request.urlopen(same_origin, timeout=2) as response:
+            assert response.status == 200
+
+        configured = urllib.request.Request(
+            f"http://127.0.0.1:{port}/health",
+            headers={"Origin": "https://console.example.test"},
+        )
+        with urllib.request.urlopen(configured, timeout=2) as response:
+            assert response.headers["Access-Control-Allow-Origin"] == (
+                "https://console.example.test"
+            )
+
+        denied = urllib.request.Request(
+            f"http://127.0.0.1:{port}/health",
+            headers={"Origin": "https://evil.example.test"},
+        )
+        try:
+            urllib.request.urlopen(denied, timeout=2)
+            assert False, "An unconfigured origin must be denied."
+        except urllib.error.HTTPError as error:
+            assert error.code == 403
+
+        preflight = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/workflows",
+            method="OPTIONS",
+            headers={
+                "Origin": "https://console.example.test",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "Authorization, Content-Type",
+            },
+        )
+        with urllib.request.urlopen(preflight, timeout=2) as response:
+            assert response.status == 204
+            assert response.headers["Access-Control-Allow-Methods"] == (
+                "GET, POST, DELETE, OPTIONS"
+            )
     finally:
         server.stop()
 
@@ -360,6 +419,225 @@ def test_http_approval_is_admin_only_and_audited_by_role():
         assert approved["approval_decisions"]["review"] == "admin"
     finally:
         server.stop()
+
+
+def test_http_credentials_can_be_created_rotated_and_revoked(tmp_path):
+    store = ChatStore(tmp_path / "credentials.sqlite3")
+    bus = EventBus()
+    api = WorkflowAPIService(WorkflowEngine(event_bus=bus), store)
+    server = WorkflowHTTPServer(
+        api,
+        bus,
+        host="127.0.0.1",
+        port=0,
+        role_tokens={"admin-token": ("admin", "operator-one")},
+        chat_service=SimpleNamespace(store=store),
+    )
+    server.start()
+    port = server._server.server_address[1]
+
+    try:
+        create_request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/auth/credentials",
+            data=json.dumps({
+                "role": "user",
+                "subject": "tenant-a:alice",
+                "ttl_seconds": 3600,
+            }).encode(),
+            method="POST",
+            headers={
+                "Authorization": "Bearer admin-token",
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(create_request, timeout=2) as response:
+            created = json.loads(response.read())
+        assert created["role"] == "user"
+        assert created["subject"] == "tenant-a:alice"
+        assert len(created["token"]) >= 32
+
+        inventory_request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/auth/credentials",
+            headers={"Authorization": "Bearer admin-token"},
+        )
+        with urllib.request.urlopen(inventory_request, timeout=2) as response:
+            inventory = json.loads(response.read())
+        active = next(
+            item
+            for item in inventory["credentials"]
+            if item["id"] == created["id"]
+        )
+        assert active["status"] == "active"
+        assert "token" not in active
+        assert "token_hash" not in active
+
+        authorized = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/session",
+            headers={"Authorization": f"Bearer {created['token']}"},
+        )
+        with urllib.request.urlopen(authorized, timeout=2) as response:
+            session = json.loads(response.read())
+        assert session["role"] == "user"
+
+        rotate_request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/auth/credentials/"
+            f"{created['id']}/rotate",
+            data=json.dumps({"ttl_seconds": 3600}).encode(),
+            method="POST",
+            headers={
+                "Authorization": "Bearer admin-token",
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(rotate_request, timeout=2) as response:
+            rotated = json.loads(response.read())
+        assert rotated["replaced_id"] == created["id"]
+
+        try:
+            urllib.request.urlopen(authorized, timeout=2)
+            assert False, "Rotated credential must stop working."
+        except urllib.error.HTTPError as error:
+            assert error.code == 401
+
+        revoke_request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/auth/credentials/{rotated['id']}",
+            data=b"",
+            method="DELETE",
+            headers={"Authorization": "Bearer admin-token"},
+        )
+        with urllib.request.urlopen(revoke_request, timeout=2) as response:
+            revoked = json.loads(response.read())
+        assert revoked["revoked"] is True
+
+        revoked_authorized = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/session",
+            headers={"Authorization": f"Bearer {rotated['token']}"},
+        )
+        try:
+            urllib.request.urlopen(revoked_authorized, timeout=2)
+            assert False, "Revoked credential must stop working."
+        except urllib.error.HTTPError as error:
+            assert error.code == 401
+    finally:
+        server.stop()
+        store.close()
+
+
+def test_http_general_audit_is_admin_only_and_paged(tmp_path):
+    store = ChatStore(tmp_path / "audit.sqlite3")
+    bus = EventBus()
+    api = WorkflowAPIService(WorkflowEngine(event_bus=bus), store)
+    server = WorkflowHTTPServer(
+        api,
+        bus,
+        host="127.0.0.1",
+        port=0,
+        role_tokens={
+            "admin-token": ("admin", "operator-one"),
+            "user-token": ("user", "user-one"),
+        },
+        chat_service=SimpleNamespace(store=store),
+    )
+    server.start()
+    port = server._server.server_address[1]
+
+    try:
+        create_request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/workflows",
+            data=json.dumps({
+                "name": "audited workflow",
+                "nodes": [{"name": "step", "value": "done"}],
+            }).encode(),
+            method="POST",
+            headers={
+                "Authorization": "Bearer admin-token",
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(create_request, timeout=2) as response:
+            workflow = json.loads(response.read())
+            assert response.status == 201
+
+        run_request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/workflows/{workflow['id']}/runs",
+            data=b"{}",
+            method="POST",
+            headers={
+                "Authorization": "Bearer admin-token",
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(run_request, timeout=2) as response:
+            assert response.status == 201
+
+        for token, expected_status in ((None, 401), ("user-token", 403)):
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{port}/v1/audit",
+                headers={
+                    "Authorization": f"Bearer {token}"
+                } if token else {},
+            )
+            try:
+                urllib.request.urlopen(request, timeout=2)
+                assert False, "Audit must be restricted to administrators."
+            except urllib.error.HTTPError as error:
+                assert error.code == expected_status
+
+        audit_request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/audit?limit=10&offset=0",
+            headers={"Authorization": "Bearer admin-token"},
+        )
+        with urllib.request.urlopen(audit_request, timeout=2) as response:
+            audit = json.loads(response.read())
+        assert audit["has_more"] is False
+        actions = {event["action"] for event in audit["events"]}
+        assert {"workflow_created", "workflow_run_created"} <= actions
+        assert all(event["actor_id"] != "admin-token" for event in audit["events"])
+        assert all(len(event["actor_id"]) == 64 for event in audit["events"])
+
+        filtered_request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/audit?limit=10&action=workflow_created",
+            headers={"Authorization": "Bearer admin-token"},
+        )
+        with urllib.request.urlopen(filtered_request, timeout=2) as response:
+            filtered = json.loads(response.read())
+        assert filtered["events"]
+        assert all(
+            event["action"] == "workflow_created"
+            for event in filtered["events"]
+        )
+
+        summary_request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/audit/summary",
+            headers={"Authorization": "Bearer admin-token"},
+        )
+        with urllib.request.urlopen(summary_request, timeout=2) as response:
+            summary = json.loads(response.read())
+        assert summary["events_scanned"] == len(audit["events"])
+        assert summary["action_counts"]["workflow_created"] == 1
+
+        csv_request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/audit/export"
+            "?format=csv&limit=100",
+            headers={"Authorization": "Bearer admin-token"},
+        )
+        with urllib.request.urlopen(csv_request, timeout=2) as response:
+            csv_body = response.read().decode("utf-8")
+            assert response.headers["Content-Type"].startswith("text/csv")
+        assert "actor_id" in csv_body
+        assert "workflow_created" in csv_body
+
+        json_request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/audit/export"
+            "?format=json&limit=100",
+            headers={"Authorization": "Bearer admin-token"},
+        )
+        with urllib.request.urlopen(json_request, timeout=2) as response:
+            exported = json.loads(response.read())
+        assert exported
+    finally:
+        server.stop()
+        store.close()
 
 
 def test_http_workflow_ownership_survives_restart_without_token_storage(

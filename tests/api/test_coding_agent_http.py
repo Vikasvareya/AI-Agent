@@ -1,6 +1,7 @@
 import json
 import urllib.error
 import urllib.request
+from urllib.parse import quote
 
 from app.agents.coding_agent import CodingAgent
 from app.api.http_server import WorkflowHTTPServer
@@ -88,6 +89,48 @@ def test_coding_agent_api_is_admin_only_and_returns_unapplied_proposals(
                 assert False, "Only administrators can inspect coding workspaces."
             except urllib.error.HTTPError as error:
                 assert error.code == expected_status
+
+        try:
+            urllib.request.urlopen(
+                _request(
+                    f"{base_url}/v1/coding/projects/import",
+                    method="POST",
+                    body={"path": str(workspace)},
+                    token="user-token",
+                ),
+                timeout=2,
+            )
+            assert False, "Only administrators can add coding projects."
+        except urllib.error.HTTPError as error:
+            assert error.code == 403
+        try:
+            urllib.request.urlopen(
+                _request(
+                    f"{base_url}/v1/coding/directories",
+                    token="user-token",
+                ),
+                timeout=2,
+            )
+            assert False, "Only administrators can browse project locations."
+        except urllib.error.HTTPError as error:
+            assert error.code == 403
+
+        for path in (
+            "/v1/coding/projects/sample-app",
+            "/v1/coding/sessions/session-id",
+        ):
+            try:
+                urllib.request.urlopen(
+                    _request(
+                        f"{base_url}{path}",
+                        method="DELETE",
+                        token="user-token",
+                    ),
+                    timeout=2,
+                )
+                assert False, "Only administrators can delete coding data."
+            except urllib.error.HTTPError as error:
+                assert error.code == 403
 
         with urllib.request.urlopen(
             _request(
@@ -211,6 +254,7 @@ def test_coding_proposal_api_recovers_owner_permission_and_audit(
     role_tokens = {
         "admin-one": ("admin", "operator-one"),
         "admin-two": ("admin", "operator-two"),
+        "user-token": "user",
     }
 
     first_store = ChatStore(database_path)
@@ -273,6 +317,7 @@ def test_coding_proposal_api_recovers_owner_permission_and_audit(
         port=0,
         role_tokens=role_tokens,
         coding_agent=second_agent,
+        chat_service=ChatService(second_store, FakeProvider()),
     )
     second_server.start()
     second_url = f"http://127.0.0.1:{second_server._server.server_address[1]}"
@@ -333,6 +378,82 @@ def test_coding_proposal_api_recovers_owner_permission_and_audit(
             applied = json.loads(response.read())
         assert applied["status"] == "applied"
         assert source_file.read_text(encoding="utf-8") == "print('Hello')\n"
+
+        for token, expected_status in (
+            (None, 401),
+            ("user-token", 403),
+        ):
+            try:
+                urllib.request.urlopen(
+                    _request(
+                        f"{second_url}/v1/coding/audit",
+                        token=token,
+                    ),
+                    timeout=3,
+                )
+                assert False, "Coding audit must be restricted to administrators."
+            except urllib.error.HTTPError as error:
+                assert error.code == expected_status
+
+        with urllib.request.urlopen(
+            _request(
+                f"{second_url}/v1/coding/audit?limit=2&offset=0",
+                token="admin-one",
+            ),
+            timeout=3,
+        ) as response:
+            first_page = json.loads(response.read())
+        assert first_page["limit"] == 2
+        assert first_page["offset"] == 0
+        assert first_page["has_more"] is True
+        assert len(first_page["events"]) == 2
+
+        with urllib.request.urlopen(
+            _request(
+                f"{second_url}/v1/coding/audit?limit=2&offset=2",
+                token="admin-one",
+            ),
+            timeout=3,
+        ) as response:
+            second_page = json.loads(response.read())
+        assert second_page["has_more"] is False
+        assert len(second_page["events"]) == 2
+        audit_page = first_page["events"] + second_page["events"]
+        assert {item["action"] for item in audit_page} == {
+            "proposal_created",
+            "permission_mode_set",
+            "proposal_apply_started",
+            "proposal_applied",
+        }
+        assert all(
+            len(item["actor_id"]) == 64
+            and all(
+                character in "0123456789abcdef"
+                for character in item["actor_id"]
+            )
+            for item in audit_page
+        )
+        assert "admin-one" not in repr(audit_page)
+
+        for query in (
+            "limit=0",
+            "limit=101",
+            "limit=invalid",
+            "limit=1&limit=2",
+            "offset=10001",
+        ):
+            try:
+                urllib.request.urlopen(
+                    _request(
+                        f"{second_url}/v1/coding/audit?{query}",
+                        token="admin-one",
+                    ),
+                    timeout=3,
+                )
+                assert False, f"Expected invalid audit query: {query}"
+            except urllib.error.HTTPError as error:
+                assert error.code == 400
+
         audit = second_store.list_coding_audit()
         assert {item["action"] for item in audit} == {
             "proposal_created",
@@ -347,6 +468,27 @@ def test_coding_proposal_api_recovers_owner_permission_and_audit(
             for item in audit
         )
         assert "admin-one" not in repr(audit)
+
+        with urllib.request.urlopen(
+            _request(
+                f"{second_url}/v1/audit?limit=100&offset=0",
+                token="admin-one",
+            ),
+            timeout=3,
+        ) as response:
+            general_audit = json.loads(response.read())
+        general_actions = {
+            item["action"]
+            for item in general_audit["events"]
+        }
+        assert "permission_mode_set" in general_actions
+        assert "proposal_created" in general_actions
+        assert "proposal_applied" in general_actions
+        assert all(
+            len(item["actor_id"]) == 64
+            for item in general_audit["events"]
+        )
+        assert "admin-one" not in repr(general_audit)
     finally:
         second_server.stop()
         second_store.close()
@@ -370,7 +512,11 @@ def test_project_editor_sessions_context_and_sharing_api(tmp_path):
         },
         require_auth=True,
         chat_service=ChatService(store, provider),
-        coding_agent=CodingAgent(provider, workspace),
+        coding_agent=CodingAgent(
+            provider,
+            workspace,
+            persistence_store=store,
+        ),
     )
     server.start()
     base_url = f"http://127.0.0.1:{server._server.server_address[1]}"
@@ -475,6 +621,157 @@ def test_project_editor_sessions_context_and_sharing_api(tmp_path):
             "/v1/coding/files?project=sample-app",
         )
         assert files["files"] == ["sample-app/main.py"]
+
+        _, active_share = request_json(
+            f"/v1/coding/sessions/{session['id']}/share",
+            method="POST",
+            body={},
+        )
+        _, deleted_session = request_json(
+            f"/v1/coding/sessions/{session['id']}",
+            method="DELETE",
+        )
+        assert deleted_session == {
+            "id": session["id"],
+            "deleted": True,
+        }
+        assert store.list_coding_proposals() == []
+        for path, token in (
+            (f"/v1/coding/sessions/{session['id']}", "admin-token"),
+            (f"/v1/coding/shared/{active_share['token']}", None),
+        ):
+            try:
+                urllib.request.urlopen(
+                    _request(f"{base_url}{path}", token=token),
+                    timeout=3,
+                )
+                assert False, "Deleted coding conversations must not be readable."
+            except urllib.error.HTTPError as error:
+                assert error.code == 404
+
+        _, project_session = request_json(
+            "/v1/coding/sessions",
+            method="POST",
+            body={"project_id": "sample-app", "title": "Project cleanup"},
+        )
+        _, project_share = request_json(
+            f"/v1/coding/sessions/{project_session['id']}/share",
+            method="POST",
+            body={},
+        )
+        try:
+            request_json(
+                "/v1/coding/projects/%2E",
+                method="DELETE",
+            )
+            assert False, "The workspace root must not be deletable."
+        except urllib.error.HTTPError as error:
+            assert error.code == 400
+
+        _, deleted_project = request_json(
+            "/v1/coding/projects/sample-app",
+            method="DELETE",
+        )
+        assert deleted_project == {
+            "id": "sample-app",
+            "deleted": True,
+            "files_deleted": True,
+            "deleted_conversations": 1,
+        }
+        assert not (workspace / "sample-app").exists()
+        for path, token in (
+            (f"/v1/coding/sessions/{project_session['id']}", "admin-token"),
+            (f"/v1/coding/shared/{project_share['token']}", None),
+        ):
+            try:
+                urllib.request.urlopen(
+                    _request(f"{base_url}{path}", token=token),
+                    timeout=3,
+                )
+                assert False, "Deleting a project must remove its conversations."
+            except urllib.error.HTTPError as error:
+                assert error.code == 404
+
+        external_parent = tmp_path / "other-location"
+        external_parent.mkdir()
+        existing_project_path = external_parent / "existing-app"
+        existing_project_path.mkdir()
+        existing_source = existing_project_path / "main.py"
+        existing_source.write_bytes(b"print('hello')\n")
+        _, directory_listing = request_json(
+            f"/v1/coding/directories?path={quote(str(external_parent), safe='')}",
+        )
+        assert directory_listing["current"] == str(external_parent)
+        assert [directory["name"] for directory in directory_listing["directories"]] == [
+            "existing-app",
+        ]
+        _, existing_project = request_json(
+            "/v1/coding/projects/import",
+            method="POST",
+            body={"path": str(existing_project_path)},
+        )
+        assert existing_project["external"] is True
+        restarted_agent = CodingAgent(
+            provider,
+            workspace,
+            persistence_store=store,
+        )
+        assert existing_project["id"] in {
+            project["id"]
+            for project in restarted_agent.list_projects()["projects"]
+        }
+        _, same_project = request_json(
+            "/v1/coding/projects/import",
+            method="POST",
+            body={"path": str(existing_project_path)},
+        )
+        assert same_project["id"] == existing_project["id"]
+        _, external_files = request_json(
+            f"/v1/coding/files?project={existing_project['id']}",
+        )
+        assert external_files["files"] == [
+            f"{existing_project['id']}/main.py",
+        ]
+        _, external_file = request_json(
+            "/v1/coding/file?path="
+            + quote(f"{existing_project['id']}/main.py", safe=""),
+        )
+        assert external_file["content"] == "print('hello')\n"
+        provider.diff_path = f"{existing_project['id']}/main.py"
+        _, external_proposal = request_json(
+            "/v1/coding/proposals",
+            method="POST",
+            body={
+                "task": "Update the external project greeting.",
+                "project_id": existing_project["id"],
+                "files": [f"{existing_project['id']}/main.py"],
+            },
+        )
+        _, applied_external_proposal = request_json(
+            f"/v1/coding/proposals/{external_proposal['proposal_id']}/apply",
+            method="POST",
+            body={},
+        )
+        assert applied_external_proposal["applied"] is True
+        assert existing_source.read_text(encoding="utf-8") == "print('Hello')\n"
+
+        _, created_external_project = request_json(
+            "/v1/coding/projects",
+            method="POST",
+            body={
+                "name": "new-location-app",
+                "parent_path": str(external_parent),
+            },
+        )
+        created_external_path = external_parent / "new-location-app"
+        assert created_external_project["external"] is True
+        assert created_external_path.is_dir()
+        _, removed_external_project = request_json(
+            f"/v1/coding/projects/{created_external_project['id']}",
+            method="DELETE",
+        )
+        assert removed_external_project["files_deleted"] is False
+        assert created_external_path.is_dir()
     finally:
         server.stop()
         store.close()

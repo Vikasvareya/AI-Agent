@@ -5,7 +5,7 @@
 | Area | Current technology | Observed constraint |
 | --- | --- | --- |
 | Runtime | Python, standard-library threaded HTTP server | Threaded, process-local state; no proven throughput target. |
-| Model provider | Ollama | `ProviderFactory` currently instantiates Ollama only. |
+| Model provider | Ollama or OpenAI-compatible Chat Completions | One provider is selected per server; compatible adapter is non-streaming. |
 | Chat persistence | SQLite or PostgreSQL | SQLite is local/single-instance; PostgreSQL pool is per process. |
 | UI | React, TypeScript, Vite | Separate workflow operator UI also exists. |
 | Workflows/events | In-process Python DAG engine, bounded event bus, HTTP SSE | No durable queue, cross-process event bus, or WebSocket transport. |

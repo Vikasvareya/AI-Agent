@@ -41,11 +41,14 @@ be run by subsystem, for example `python -m pytest tests/api -q`.
 
 ## Current evidence and gaps
 
-The backend suite has most recently passed with 144 tests and one upstream
-AnyIO/pytest deprecation warning. GitHub Actions now runs the backend suite
-and frontend production build on pushes and pull requests.
+The backend suite has most recently passed with 156 tests and one upstream
+AnyIO/pytest deprecation warning. GitHub Actions runs the backend suite,
+frontend production build, full-history Gitleaks scan, Compose configuration
+validation, application container build/startup smoke test, and Kubernetes
+manifest schema validation on pushes and pull requests. The scanners are
+version-pinned and verify release archive checksums before execution.
 
-Container builds, Kubernetes deployment, load/soak/chaos tests,
+Kubernetes deployment, model-inference smoke testing, load/soak/chaos tests,
 tenant-isolation assurance, dependency vulnerability scanning, and live Brave
 Search integration have not been established by the available test evidence.
 

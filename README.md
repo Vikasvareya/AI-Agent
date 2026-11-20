@@ -10,8 +10,8 @@ currently a proven high-traffic or high-availability platform.
 - Python planning, execution, tool, memory, plugin, workflow, and MCP building
   blocks.
 - A threaded HTTP API and health service.
-- React chat with conversation persistence and installed Ollama model
-  discovery/switching.
+- React chat with conversation persistence and configured-provider model
+  discovery/switching (Ollama by default; OpenAI-compatible APIs also supported).
 - A separate administrator coding workspace with scoped file access,
   explicit editor saves, reviewed patch proposals, project sessions, and
   optional read-only shares.
@@ -19,7 +19,8 @@ currently a proven high-traffic or high-availability platform.
   terms.
 - Docker Compose and Kubernetes deployment examples.
 
-**Important boundaries:** Ollama is the only provider currently instantiated.
+**Important boundaries:** Provider selection is per server, and the
+OpenAI-compatible adapter supports non-streaming Chat Completions only.
 Workflow and some coding/runtime state is process-local. Chat is
 non-streaming; image/video generation and model training are not implemented.
 Skills, marketplace installs, automation, shell execution, and coding-agent

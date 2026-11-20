@@ -3,8 +3,8 @@
 This guide describes patterns visible in the implementation, not a guarantee
 that every module is fully abstracted.
 
-- **Factory:** `ProviderFactory` creates the configured model provider
-  (currently Ollama only).
+- **Factory:** `ProviderFactory` creates the configured Ollama or
+  OpenAI-compatible model provider.
 - **Registry:** intents, tools, and agents are registered and resolved through
   registries.
 - **Strategy/interface seams:** provider, planner, executor, context resolver,

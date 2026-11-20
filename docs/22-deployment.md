@@ -32,19 +32,49 @@ Health endpoints:
 - `GET /health/ready`
 - `GET /metrics`
 
+Readiness requires a working chat database connection and a reachable endpoint
+for the selected model provider. It does not confirm that the configured model
+is available or can generate a response.
+
 ## Model selection and capabilities
 
-The chat UI lists models installed on the configured Ollama server and lets
-each user select one for a message. The API default is set by `OLLAMA_MODEL`;
-`OLLAMA_HOST` points to the Ollama server. In Docker Compose these are configured
-for the `ollama` service, with `llama3.2` as the default. Models are not pulled
-automatically. For example:
+The chat UI lists models from the configured provider and lets each user select
+one for a message. Ollama remains the default provider:
+
+```env
+AI_AGENT_PROVIDER=ollama
+OLLAMA_HOST=http://ollama:11434
+OLLAMA_MODEL=llama3.2
+```
+
+In Docker Compose, Ollama is configured as the default service. Models are not
+pulled automatically. For example:
 
 ```bash
 docker compose exec ollama ollama pull llama3.2
 ```
 
-Use `/v1/chat/models` to inspect installed models or
+To use an OpenAI-compatible Chat Completions endpoint instead, configure the
+server environment and keep the API key out of client code:
+
+```env
+AI_AGENT_PROVIDER=openai_compatible
+OPENAI_COMPATIBLE_BASE_URL=https://api.openai.com/v1
+OPENAI_COMPATIBLE_API_KEY=replace-with-a-provider-key
+OPENAI_COMPATIBLE_MODEL=gpt-4o-mini
+OPENAI_COMPATIBLE_TIMEOUT=60
+```
+
+The adapter calls `/models` and `/chat/completions` and supports non-streaming
+chat only. It accepts HTTPS endpoints; when an API key is configured, plain
+HTTP is allowed only for localhost/loopback. Set `AI_AGENT_PROVIDER`,
+`OPENAI_COMPATIBLE_BASE_URL`, `OPENAI_COMPATIBLE_MODEL`, and
+`OPENAI_COMPATIBLE_TIMEOUT` in Kubernetes `configmap.yaml`, and store
+`OPENAI_COMPATIBLE_API_KEY` in `secret.yaml` or, preferably, an external
+secret manager. The sample Compose deployment still starts Ollama even when
+the compatible provider is selected.
+
+Use `/v1/chat/models` to inspect models or
 `/v1/chat/models?refresh=true` to bypass the short provider-side cache. Coding
 mode changes the assistant prompt but does not execute code. Image and video
 controls are intentionally unavailable until corresponding generation
@@ -114,7 +144,8 @@ The deployment includes:
 - CPU-based horizontal pod autoscaling
 
 Before production, replace the example tokens in `secret.yaml` and use an
-external secret manager or sealed secret mechanism.
+external secret manager or sealed secret mechanism. Set
+`OPENAI_COMPATIBLE_API_KEY` there only when selecting that provider.
 
 Set separate `AI_AGENT_ADMIN_TOKEN` and `AI_AGENT_USER_TOKEN` values. The API
 server listens on port 8081 while health probes use port 8080. Docker Compose

@@ -62,7 +62,7 @@ The stdlib HTTP transport provides:
 
 The React chat application is served at `/chat/`; the workflow control plane
 remains at `/`. Both use the same-origin API on port 8081. Chat completion uses
-the configured `BaseProvider` implementation (currently Ollama) and returns a
+the configured `BaseProvider` implementation (Ollama by default) and returns a
 JSON response after generation; token streaming is not implemented yet.
 
 | Method | Path | Purpose |
@@ -71,7 +71,10 @@ JSON response after generation; token streaming is not implemented yet.
 | `GET` | `/v1/chat/models` | List models installed in the configured provider |
 | `GET` | `/v1/chat/capabilities` | List available chat modes and unsupported capabilities |
 | `GET` | `/v1/coding/projects` | List the workspace root and eligible project folders (admin) |
-| `POST` | `/v1/coding/projects` | Create a direct child project folder (admin) |
+| `GET` | `/v1/coding/directories?path={absolute-path}` | Browse server directories for project selection (admin) |
+| `POST` | `/v1/coding/projects` | Create a project in the configured workspace or selected parent directory (admin) |
+| `POST` | `/v1/coding/projects/import` | Add an existing server directory as a project (admin) |
+| `DELETE` | `/v1/coding/projects/{id}` | Delete a workspace child project or remove an external project link, with its saved conversations and associated pending proposals (admin) |
 | `GET` | `/v1/coding/status` | Check whether the project coding agent is configured |
 | `GET` | `/v1/coding/files?project={id}` | List eligible project files (admin) |
 | `GET` | `/v1/coding/file?path={path}` | Read an eligible project file (admin) |
@@ -79,11 +82,20 @@ JSON response after generation; token streaming is not implemented yet.
 | `GET` | `/v1/coding/models` | List models available to the coding workspace |
 | `GET` | `/v1/coding/permissions` | Read the current coding permission mode |
 | `POST` | `/v1/coding/permissions` | Select manual review or explicitly confirmed auto-apply |
+| `GET` | `/v1/coding/audit?limit=50&offset=0` | Read paginated coding audit events (admin only; limit 1-100, offset 0-10000) |
+| `GET` | `/v1/audit?limit=50&offset=0` | Read paginated privileged-action audit events (admin only; limit 1-100, offset 0-10000) |
+| `GET` | `/v1/audit/export?format=csv&limit=100` | Export bounded JSON or CSV audit data (admin only; limit 1-1000) |
+| `GET` | `/v1/audit/summary` | Return audit action counts and security-sensitive event summary (admin only) |
+| `POST` | `/v1/auth/credentials` | Create an expiring role credential (admin only) |
+| `GET` | `/v1/auth/credentials` | List credential metadata and active/expired/revoked status (admin only) |
+| `POST` | `/v1/auth/credentials/{id}/rotate` | Revoke a credential and issue its replacement (admin only) |
+| `DELETE` | `/v1/auth/credentials/{id}` | Revoke an active credential (admin only) |
 | `GET` | `/v1/coding/proposals` | List the caller's pending proposals, including recovered proposals |
 | `GET` | `/v1/coding/integrations` | Report skill, plugin, MCP, and training availability |
 | `GET` | `/v1/coding/sessions?project={id}` | List the caller's project sessions (admin) |
 | `POST` | `/v1/coding/sessions` | Create a persistent project session (admin) |
 | `GET` | `/v1/coding/sessions/{id}` | Read a session and up to 100 recent messages (admin) |
+| `DELETE` | `/v1/coding/sessions/{id}` | Delete a session, its messages, share links, and associated pending proposals (admin) |
 | `POST` | `/v1/coding/sessions/{id}/share` | Create an explicit seven-day read-only share link (admin) |
 | `DELETE` | `/v1/coding/sessions/{id}/shares` | Revoke all share links for a session (admin) |
 | `GET` | `/v1/coding/shared/{token}` | Read a shared session with its unguessable token |
@@ -96,9 +108,19 @@ JSON response after generation; token streaming is not implemented yet.
 | `DELETE` | `/v1/chat/conversations/{id}` | Delete a conversation and its messages |
 | `POST` | `/v1/chat/conversations/{id}/messages` | Send a message and receive the assistant reply |
 
-The model catalog currently comes from the configured Ollama server. It
-contains installed models, the provider default, and stable model IDs suitable
-for message requests. The provider caches the catalog for up to 30 seconds;
+Coding audit records are returned newest-first. The endpoint accepts `limit`
+from 1 to 100 and `offset` from 0 to 10,000, and includes a `has_more` flag.
+Actor identifiers are digests rather than bearer tokens. Records are retained
+for 365 days by default; set `AI_AGENT_CODING_AUDIT_RETENTION_DAYS=0` to
+disable automatic pruning.
+General privileged-action audit records are available from `/v1/audit` with
+the same pagination limits and actor-digest rules. Set
+`AI_AGENT_AUDIT_RETENTION_DAYS=0` to disable general audit pruning.
+
+The model catalog comes from the selected provider: installed Ollama models or
+the configured OpenAI-compatible `/models` endpoint. It contains the provider
+default and stable model IDs suitable for message requests. The provider caches
+the catalog for up to 30 seconds;
 `GET /v1/chat/models?refresh=true` bypasses that cache.
 
 ```json
@@ -123,8 +145,8 @@ when `AI_AGENT_BRAVE_SEARCH_API_KEY` is configured.
 
 ### Project Coding Agent
 
-The coding workspace is a separate dashboard at `/coding/`, distinct from the
-chat's Coding prompt mode and the workflow operator console. It is available
+The coding workspace is a separate dashboard at `/chat/coding/`, distinct from
+the chat's Coding prompt mode and the workflow operator console. It is available
 only to administrators and only when `AI_AGENT_CODING_WORKSPACE` points to an
 existing workspace directory. It lists eligible source files and reads only
 1–8 files explicitly selected by the administrator. The file browser is capped
@@ -157,13 +179,18 @@ Permission mode defaults to `manual`. A manual proposal remains pending until
 an administrator reviews it and calls `/v1/coding/proposals/{id}/apply` or
 `/reject`. Applying rechecks that each source file still matches the version
 used to generate the proposal; stale proposals are rejected. New files can be
-created in existing workspace directories. The project API creates folders
-only as direct children of the configured workspace root; editor saves are
-explicit user actions and use stale-file checks. Deletions, renames, nested
+created in existing project directories. Administrators can create projects in
+selected server-side locations or add existing directories. Deleting a child
+of the configured workspace permanently removes its folder; removing an
+external project only removes its registration and saved conversations. The
+workspace root cannot be deleted. Conversation deletion removes its messages
+and invalidates its share links. Individual file deletion, renames, nested
 directory creation, shell commands, and external tool execution are not
 supported.
 
-`POST /v1/coding/projects` accepts `{"name":"my-project"}`. File creation uses
+`POST /v1/coding/projects` accepts `{"name":"my-project"}` and optionally a
+server-side `parent_path` absolute path. Existing directories can be registered
+with `POST /v1/coding/projects/import` using `{"path":"..."}`. File creation uses
 `POST /v1/coding/file` with `{"path":"my-project/main.py","content":"...","create":true}`.
 Saving an existing file requires the original content returned by the read
 endpoint:
@@ -252,8 +279,8 @@ A message request is:
 }
 ```
 
-`model` is optional and defaults to the configured Ollama model. Explicit model
-IDs must appear in the model catalog. `mode` is optional and accepts `chat` or
+`model` is optional and defaults to the selected provider's configured model.
+Explicit model IDs must appear in the model catalog. `mode` is optional and accepts `chat` or
 `coding`; requests for unsupported modes, including `image` and `video`, return
 HTTP 501 with `CAPABILITY_UNAVAILABLE`. An unavailable model returns HTTP 400
 with `MODEL_NOT_FOUND`.
