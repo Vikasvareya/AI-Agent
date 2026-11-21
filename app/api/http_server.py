@@ -17,11 +17,20 @@ from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
 from app.agents.coding_agent import CodingAgent, CodingAgentError
+from app.agents.coordinator import (
+    CoordinatorAgent,
+    DelegationPermissionPolicy,
+)
 from app.api.security_config import validate_api_auth
 from app.api.workflow_service import APIError, WorkflowAPIService
 from app.chat.service import ChatError, ChatService
 from app.realtime.event_bus import EventBus
 from app.realtime.models import WorkflowEvent
+from app.research.page_fetcher import (
+    PageFetcher,
+    PageFetchError,
+    UnsafeUrlError,
+)
 from app.workflows.engine import WorkflowEngine
 from app.workflows.models import Workflow, WorkflowNode
 
@@ -82,6 +91,8 @@ class WorkflowHTTPServer:
         coding_agent: CodingAgent | None = None,
         secure_guest_cookies: bool = False,
         allowed_origins: tuple[str, ...] = (),
+        delegation_coordinator: CoordinatorAgent | None = None,
+        delegation_policy: DelegationPermissionPolicy | None = None,
     ):
         self.api = api
         self.event_bus = event_bus
@@ -115,6 +126,8 @@ class WorkflowHTTPServer:
             for origin in allowed_origins
             if origin.strip()
         )
+        self.delegation_coordinator = delegation_coordinator
+        self.delegation_policy = delegation_policy
         self.rate_limiter = rate_limiter or APIRateLimiter()
         self._thread: Thread | None = None
         self._stopped = False
@@ -131,6 +144,9 @@ class WorkflowHTTPServer:
                 owner.handle_request(handler)
 
             def do_DELETE(handler):
+                owner.handle_request(handler)
+
+            def do_PATCH(handler):
                 owner.handle_request(handler)
 
             def do_OPTIONS(handler):
@@ -260,7 +276,421 @@ class WorkflowHTTPServer:
             return
 
         try:
+            if handler.command == "GET" and path == "/v1/research/status":
+                if self.chat_service is None:
+                    raise APIError("RESEARCH_UNAVAILABLE", "Research service is unavailable.", 503)
+                status = (
+                    self.chat_service.search_manager.provider_status()
+                    if self.chat_service.search_manager is not None
+                    else {
+                        "active_mode": "brave",
+                        "brave": {
+                            "configured": bool(
+                                self.chat_service.web_search_provider
+                                and self.chat_service.web_search_provider.available
+                            ),
+                            "healthy": bool(
+                                self.chat_service.web_search_provider
+                                and self.chat_service.web_search_provider.available
+                            ),
+                        },
+                        "searxng": {"configured": False, "healthy": False},
+                    }
+                )
+                self._send_json(handler, 200, {"providers": status})
+            elif (
+                handler.command == "POST"
+                and path == "/v1/research/search"
+            ):
+                if self.chat_service is None:
+                    raise APIError("RESEARCH_UNAVAILABLE", "Research service is unavailable.", 503)
+                body = self._read_json(handler)
+                query = body.get("query")
+                limit = body.get("limit", 5)
+                if not isinstance(query, str) or not query.strip():
+                    raise APIError("INVALID_SEARCH", "A search query is required.", 400)
+                if not isinstance(limit, int):
+                    raise APIError("INVALID_SEARCH", "Result limit must be an integer.", 400)
+                try:
+                    if self.chat_service.search_manager is not None:
+                        results = self.chat_service.search_manager.search(query, limit=limit)
+                    else:
+                        results = [
+                            source
+                            for source in self.chat_service.web_search_provider.search(
+                                query,
+                                limit=max(1, min(limit, 10)),
+                            )
+                        ]
+                except Exception as exc:
+                    raise APIError("SEARCH_UNAVAILABLE", str(exc), 502)
+                self._send_json(handler, 200, {"query": query, "results": results})
+            elif (
+                handler.command == "POST"
+                and path == "/v1/research/fetch"
+            ):
+                body = self._read_json(handler)
+                url = body.get("url")
+                if not isinstance(url, str) or not url.strip():
+                    raise APIError("INVALID_SOURCE", "A source URL is required.", 400)
+                try:
+                    fetched = PageFetcher().fetch(url)
+                except UnsafeUrlError as exc:
+                    raise APIError("UNSAFE_SOURCE", str(exc), 400)
+                except PageFetchError as exc:
+                    raise APIError("SOURCE_FETCH_FAILED", str(exc), 502)
+                self._send_json(handler, 200, {"source": fetched})
             if (
+                handler.command == "GET"
+                and path == "/v1/memory/history"
+            ):
+                if self.chat_service is None:
+                    raise APIError("MEMORY_UNAVAILABLE", "Memory service is unavailable.", 503)
+                owner_id = self._chat_owner(handler)
+                if owner_id is None:
+                    raise APIError("UNAUTHORIZED", "A valid owner session is required.", 401)
+                record_id = parse_qs(parsed.query).get("record_id", [None])[0]
+                self._send_json(
+                    handler,
+                    200,
+                    {"history": self.chat_service.store.list_memory_history(owner_id, record_id)},
+                )
+            elif (
+                handler.command == "GET"
+                and (
+                    path == "/v1/memory/profile"
+                    or path == "/v1/memory/records"
+                )
+            ):
+                if self.chat_service is None:
+                    raise APIError("MEMORY_UNAVAILABLE", "Memory service is unavailable.", 503)
+                owner_id = self._chat_owner(handler)
+                if owner_id is None:
+                    raise APIError("UNAUTHORIZED", "A valid owner session is required.", 401)
+                status = parse_qs(parsed.query).get("status", [None])[0]
+                query = parse_qs(parsed.query).get("query", [None])[0]
+                limit = int(parse_qs(parsed.query).get("limit", ["100"])[0])
+                records = self.chat_service.store.list_memory_records(
+                    owner_id,
+                    status=status,
+                    limit=limit,
+                    query=query,
+                )
+                self._send_json(
+                    handler,
+                    200,
+                    {
+                        "profile": records if path == "/v1/memory/profile" else None,
+                        "records": records,
+                    },
+                )
+            elif (
+                handler.command == "POST"
+                and path == "/v1/memory/records"
+            ):
+                if self.chat_service is None:
+                    raise APIError("MEMORY_UNAVAILABLE", "Memory service is unavailable.", 503)
+                owner_id = self._chat_owner(handler)
+                if owner_id is None:
+                    raise APIError("UNAUTHORIZED", "A valid owner session is required.", 401)
+                body = self._read_json(handler)
+                category = body.get("category")
+                key = body.get("key")
+                value = body.get("value")
+                if not all(isinstance(item, str) and item.strip() for item in (category, key, value)):
+                    raise APIError("INVALID_MEMORY", "category, key, and value are required.", 400)
+                if len(category) > 80 or len(key) > 120 or len(value) > 2000:
+                    raise APIError("INVALID_MEMORY", "Memory fields exceed supported lengths.", 400)
+                record = self.chat_service.store.save_memory_record(
+                    owner_id,
+                    conversation_id=None,
+                    category=category.strip(),
+                    key=key.strip(),
+                    value=value.strip(),
+                    source="authorized_profile_import",
+                    confidence=1.0,
+                    status="confirmed",
+                    metadata=body.get("metadata") if isinstance(body.get("metadata"), dict) else {},
+                    expires_at=body.get("expires_at") if isinstance(body.get("expires_at"), str) else None,
+                )
+                self._send_json(handler, 201, {"record": record})
+            elif (
+                handler.command == "GET"
+                and path == "/v1/resume/drafts"
+            ):
+                if self.chat_service is None:
+                    raise APIError("RESUME_UNAVAILABLE", "Resume service is unavailable.", 503)
+                owner_id = self._chat_owner(handler)
+                if owner_id is None:
+                    raise APIError("UNAUTHORIZED", "A valid owner session is required.", 401)
+                self._send_json(
+                    handler,
+                    200,
+                    {"drafts": self.chat_service.store.list_resume_drafts(owner_id)},
+                )
+            elif (
+                handler.command == "POST"
+                and path == "/v1/resume/drafts"
+            ):
+                if self.chat_service is None:
+                    raise APIError("RESUME_UNAVAILABLE", "Resume service is unavailable.", 503)
+                owner_id = self._chat_owner(handler)
+                if owner_id is None:
+                    raise APIError("UNAUTHORIZED", "A valid owner session is required.", 401)
+                body = self._read_json(handler)
+                title = body.get("title")
+                content = body.get("content")
+                status = body.get("status", "draft")
+                if not isinstance(title, str) or not title.strip():
+                    raise APIError("INVALID_RESUME", "A resume title is required.", 400)
+                if not isinstance(content, str) or not content.strip():
+                    raise APIError("INVALID_RESUME", "Resume content is required.", 400)
+                draft = self.chat_service.store.save_resume_draft(
+                    owner_id,
+                    title=title,
+                    content=content,
+                    status=status if status in ("draft", "edited", "approved") else "draft",
+                )
+                self._send_json(handler, 201, {"draft": draft})
+            elif (
+                path.startswith("/v1/resume/drafts/")
+                and len(path.split("/")) >= 5
+            ):
+                if self.chat_service is None:
+                    raise APIError("RESUME_UNAVAILABLE", "Resume service is unavailable.", 503)
+                owner_id = self._chat_owner(handler)
+                if owner_id is None:
+                    raise APIError("UNAUTHORIZED", "A valid owner session is required.", 401)
+                parts = path.split("/")
+                draft_id = unquote(parts[4])
+                if len(parts) == 6 and parts[5] == "export":
+                    draft = self.chat_service.store.get_resume_draft(owner_id, draft_id)
+                    if draft is None:
+                        raise APIError("RESUME_NOT_FOUND", "Resume draft was not found.", 404)
+                    self._send_json(
+                        handler,
+                        200,
+                        {"format": "text", "filename": f"{draft['title']}.txt", "content": draft["content"]},
+                    )
+                elif len(parts) == 5 and handler.command == "GET":
+                    draft = self.chat_service.store.get_resume_draft(owner_id, draft_id)
+                    if draft is None:
+                        raise APIError("RESUME_NOT_FOUND", "Resume draft was not found.", 404)
+                    self._send_json(handler, 200, {"draft": draft})
+                elif len(parts) == 5 and handler.command in ("PATCH", "POST"):
+                    body = self._read_json(handler)
+                    existing = self.chat_service.store.get_resume_draft(owner_id, draft_id)
+                    if existing is None:
+                        raise APIError("RESUME_NOT_FOUND", "Resume draft was not found.", 404)
+                    draft = self.chat_service.store.save_resume_draft(
+                        owner_id,
+                        draft_id=draft_id,
+                        title=body.get("title", existing["title"]),
+                        content=body.get("content", existing["content"]),
+                        status=body.get("status", existing["status"]),
+                    )
+                    self._send_json(handler, 200, {"draft": draft})
+                elif len(parts) == 5 and handler.command == "DELETE":
+                    if not self.chat_service.store.delete_resume_draft(owner_id, draft_id):
+                        raise APIError("RESUME_NOT_FOUND", "Resume draft was not found.", 404)
+                    self._send_json(handler, 200, {"deleted": True})
+                else:
+                    raise APIError("NOT_FOUND", "Resume route not found.", 404)
+            elif (
+                handler.command == "POST"
+                and path == "/v1/memory/profile/clear"
+            ):
+                if self.chat_service is None:
+                    raise APIError("MEMORY_UNAVAILABLE", "Memory service is unavailable.", 503)
+                owner_id = self._chat_owner(handler)
+                if owner_id is None:
+                    raise APIError("UNAUTHORIZED", "A valid owner session is required.", 401)
+                count = self.chat_service.store.clear_memory_records(owner_id)
+                self._send_json(handler, 200, {"deleted": count})
+            elif (
+                path.startswith("/v1/memory/records/")
+                and len(path.split("/")) == 5
+            ):
+                if self.chat_service is None:
+                    raise APIError("MEMORY_UNAVAILABLE", "Memory service is unavailable.", 503)
+                owner_id = self._chat_owner(handler)
+                if owner_id is None:
+                    raise APIError("UNAUTHORIZED", "A valid owner session is required.", 401)
+                record_id = unquote(path.split("/")[4])
+                if handler.command == "GET":
+                    record = self.chat_service.store.get_memory_record(owner_id, record_id)
+                    if record is None:
+                        raise APIError("MEMORY_NOT_FOUND", "Memory record was not found.", 404)
+                    self._send_json(handler, 200, {"record": record})
+                elif handler.command == "PATCH":
+                    body = self._read_json(handler)
+                    record = self.chat_service.store.update_memory_record(
+                        owner_id,
+                        record_id,
+                        value=body.get("value") if isinstance(body.get("value"), str) else None,
+                        category=body.get("category") if isinstance(body.get("category"), str) else None,
+                        key=body.get("key") if isinstance(body.get("key"), str) else None,
+                        status=body.get("status") if isinstance(body.get("status"), str) else None,
+                        expires_at=body.get("expires_at") if isinstance(body.get("expires_at"), str) else None,
+                        metadata=body.get("metadata") if isinstance(body.get("metadata"), dict) else None,
+                    )
+                    if record is None:
+                        raise APIError("MEMORY_NOT_FOUND", "Memory record was not found.", 404)
+                    self._send_json(handler, 200, {"record": record})
+                elif handler.command == "DELETE":
+                    deleted = self.chat_service.store.delete_memory_record(owner_id, record_id)
+                    if not deleted:
+                        raise APIError("MEMORY_NOT_FOUND", "Memory record was not found.", 404)
+                    self._send_json(handler, 200, {"deleted": True})
+                else:
+                    if not self._discard_request_body(handler):
+                        return
+                    raise APIError("METHOD_NOT_ALLOWED", "Unsupported memory operation.", 405)
+            if (
+                handler.command == "POST"
+                and path == "/v1/agents/delegate"
+            ):
+                if self.delegation_coordinator is None:
+                    raise APIError(
+                        "DELEGATION_UNAVAILABLE",
+                        "Multi-agent delegation is not configured.",
+                        503,
+                    )
+                body = self._read_json(handler)
+                agents = body.get("agents")
+                prompt = body.get("prompt")
+                if not isinstance(agents, list) or not agents or any(
+                    not isinstance(name, str) or not name.strip()
+                    for name in agents
+                ):
+                    raise APIError(
+                        "INVALID_DELEGATION",
+                        "agents must be a non-empty list of agent names.",
+                        400,
+                    )
+                owner_id = self._delegation_owner(principal)
+                try:
+                    if body.get("async") is True:
+                        if self.chat_service is None:
+                            raise APIError(
+                                "DELEGATION_UNAVAILABLE",
+                                "Durable agent task storage is not configured.",
+                                503,
+                            )
+                        result = self.delegation_coordinator.enqueue(
+                            owner_id,
+                            principal[0],
+                            [name.strip() for name in agents],
+                            prompt,
+                            policy=self.delegation_policy,
+                            persistence_store=self.chat_service.store,
+                        )
+                        response_status = 202
+                    else:
+                        result = self.delegation_coordinator.delegate(
+                            owner_id,
+                            principal[0],
+                            [name.strip() for name in agents],
+                            prompt,
+                            policy=self.delegation_policy,
+                            persistence_store=(
+                                self.chat_service.store
+                                if self.chat_service is not None
+                                else None
+                            ),
+                            max_parallel=int(body.get("max_parallel", 8)),
+                        )
+                        response_status = 202
+                except PermissionError as exc:
+                    raise APIError("DELEGATION_FORBIDDEN", str(exc), 403)
+                except ValueError as exc:
+                    raise APIError("INVALID_DELEGATION", str(exc), 400)
+                task_ids = [task["id"] for task in result["tasks"]]
+                self._record_audit(
+                    principal,
+                    "agent_tasks_delegated",
+                    task_ids[0] if len(task_ids) == 1 else None,
+                    {
+                        "task_ids": task_ids,
+                        "agents": [name.strip() for name in agents],
+                        "aggregation_status": result["aggregation"]["status"],
+                    },
+                )
+                self._send_json(handler, 202, result)
+            elif (
+                handler.command == "GET"
+                and path == "/v1/agent-tasks"
+            ):
+                if self.chat_service is None:
+                    raise APIError(
+                        "DELEGATION_UNAVAILABLE",
+                        "Durable agent task storage is not configured.",
+                        503,
+                    )
+                owner_id = self._delegation_owner(principal)
+                limit = int(parse_qs(parsed.query).get("limit", ["100"])[0])
+                self._send_json(
+                    handler,
+                    200,
+                    {
+                        "tasks": self.chat_service.store.list_delegation_tasks(
+                            owner_id,
+                            limit,
+                        )
+                    },
+                )
+            elif (
+                handler.command == "POST"
+                and path.startswith("/v1/agent-tasks/")
+                and path.endswith("/cancel")
+            ):
+                if self.chat_service is None:
+                    raise APIError(
+                        "DELEGATION_UNAVAILABLE",
+                        "Durable agent task storage is not configured.",
+                        503,
+                    )
+                task_id = path.split("/")[3]
+                owner_id = self._delegation_owner(principal)
+                cancelled = self.chat_service.store.cancel_delegation_task(
+                    owner_id,
+                    task_id,
+                )
+                if not cancelled:
+                    raise APIError(
+                        "AGENT_TASK_NOT_CANCELLABLE",
+                        f"Agent task '{task_id}' cannot be cancelled.",
+                        409,
+                    )
+                self._send_json(handler, 200, {"cancelled": True, "id": task_id})
+            elif (
+                handler.command == "GET"
+                and path.startswith("/v1/agent-tasks/")
+            ):
+                if self.chat_service is None:
+                    raise APIError(
+                        "DELEGATION_UNAVAILABLE",
+                        "Durable agent task storage is not configured.",
+                        503,
+                    )
+                task_id = path.rsplit("/", 1)[-1]
+                owner_id = self._delegation_owner(principal)
+                task = self.chat_service.store.get_delegation_task(
+                    owner_id,
+                    task_id,
+                )
+                if task is None:
+                    raise APIError(
+                        "AGENT_TASK_NOT_FOUND",
+                        f"Agent task '{task_id}' was not found.",
+                        404,
+                    )
+                task["messages"] = self.chat_service.store.list_delegation_messages(
+                    owner_id,
+                    task_id,
+                )
+                self._send_json(handler, 200, task)
+            elif (
                 handler.command == "POST"
                 and path == "/v1/chat/guest-sessions"
             ):
@@ -311,6 +741,59 @@ class WorkflowHTTPServer:
                         401,
                     )
                 if (
+                    handler.command == "GET"
+                    and len(path.split("/")) == 7
+                    and path.startswith("/v1/chat/conversations/")
+                    and path.endswith("/activity/events")
+                ):
+                    parts = path.split("/")
+                    conversation_id = unquote(parts[4])
+                    if self.chat_service.get_conversation(
+                        owner_id,
+                        conversation_id,
+                    ) is None:
+                        raise ChatError(
+                            "CONVERSATION_NOT_FOUND",
+                            "Conversation was not found.",
+                            404,
+                        )
+                    run_id = parse_qs(parsed.query).get("run_id", [None])[0]
+                    self._stream_activity_events(
+                        handler,
+                        owner_id,
+                        conversation_id,
+                        run_id,
+                    )
+                elif (
+                    handler.command == "GET"
+                    and len(path.split("/")) == 6
+                    and path.startswith("/v1/chat/conversations/")
+                    and path.endswith("/activity")
+                ):
+                    parts = path.split("/")
+                    conversation_id = unquote(parts[4])
+                    run_id = parse_qs(parsed.query).get("run_id", [None])[0]
+                    if self.chat_service.get_conversation(
+                        owner_id,
+                        conversation_id,
+                    ) is None:
+                        raise ChatError(
+                            "CONVERSATION_NOT_FOUND",
+                            "Conversation was not found.",
+                            404,
+                        )
+                    self._send_json(
+                        handler,
+                        200,
+                        {
+                            "events": self.chat_service.store.list_activity_events(
+                                owner_id,
+                                conversation_id,
+                                run_id=run_id,
+                            )
+                        },
+                    )
+                elif (
                     handler.command == "GET"
                     and path == "/v1/chat/models"
                 ):
@@ -397,6 +880,7 @@ class WorkflowHTTPServer:
                         mode=body.get("mode", "chat"),
                         web_search=body.get("web_search", False),
                         search_query=body.get("search_query"),
+                        run_id=body.get("run_id"),
                     )
                     self._send_json(handler, 200, result)
                 else:
@@ -1883,6 +2367,12 @@ class WorkflowHTTPServer:
             f"workflow:{principal[0]}:{principal[1]}".encode("utf-8")
         ).hexdigest()
 
+    @staticmethod
+    def _delegation_owner(principal: tuple[str, str]) -> str:
+        return hashlib.sha256(
+            f"delegation:{principal[0]}:{principal[1]}".encode("utf-8")
+        ).hexdigest()
+
     def _record_audit(
         self,
         principal: tuple[str, str],
@@ -2186,6 +2676,89 @@ class WorkflowHTTPServer:
         handler.send_header("Cache-Control", "no-cache")
         handler.end_headers()
         handler.wfile.write(body)
+
+    def _stream_activity_events(
+        self,
+        handler: BaseHTTPRequestHandler,
+        owner_id: str,
+        conversation_id: str,
+        run_id: str | None,
+    ) -> None:
+        subscription_id = (
+            self.event_bus.subscribe(run_id)
+            if run_id
+            else self.event_bus.subscribe(None)
+        )
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream")
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("Connection", "close")
+        handler.close_connection = True
+        handler.end_headers()
+
+        try:
+            history = self.chat_service.store.list_activity_events(
+                owner_id,
+                conversation_id,
+                run_id=run_id,
+            )
+            snapshot = json.dumps({
+                "events": history,
+            }).encode("utf-8")
+            handler.wfile.write(
+                b"event: activity.snapshot\n"
+                b"data: " + snapshot + b"\n\n"
+            )
+            handler.wfile.flush()
+
+            if run_id:
+                terminal = any(
+                    event["status"] in ("completed", "failed", "cancelled")
+                    and event["event_type"].startswith("response.")
+                    for event in history
+                )
+                if terminal:
+                    return
+
+            next_heartbeat = time.monotonic() + 15
+            while True:
+                events = self.event_bus.consume(subscription_id, limit=100)
+                for event in events:
+                    payload = event.to_dict()
+                    activity = payload.get("payload", {})
+                    if activity.get("conversation_id") != conversation_id:
+                        continue
+                    if run_id and activity.get("run_id") != run_id:
+                        continue
+                    if activity.get("visibility") != "user":
+                        continue
+                    handler.wfile.write(
+                        (
+                            f"event: {event.event_type}\n"
+                            f"data: {json.dumps(payload)}\n\n"
+                        ).encode("utf-8")
+                    )
+                    handler.wfile.flush()
+                    if (
+                        activity.get("status") in ("completed", "failed", "cancelled")
+                        and activity.get("event_type") in (
+                            "response.completed",
+                            "response.failed",
+                            "execution.completed",
+                            "execution.failed",
+                            "execution.cancelled",
+                        )
+                    ):
+                        return
+                if time.monotonic() >= next_heartbeat:
+                    handler.wfile.write(b": keep-alive\n\n")
+                    handler.wfile.flush()
+                    next_heartbeat = time.monotonic() + 15
+                time.sleep(0.05)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            self.event_bus.unsubscribe(subscription_id)
 
     def _stream_events(
         self,

@@ -7,6 +7,11 @@ certification. The current service uses static bearer tokens and has
 process-local controls. Do not expose it to untrusted networks without an
 independently reviewed deployment and identity boundary.
 
+AI Brain governance is a mandatory future architecture. The
+[AI Brain Master Architecture](./AI_BRAIN_MASTER_ARCHITECTURE.md) and
+[Shared Agent Constitution](./AGENT_CONSTITUTION.md) define the target
+boundaries; they do not add capabilities or weaken the controls listed below.
+
 ## Current controls
 
 - API authorization distinguishes configured admin and user tokens; chat

@@ -76,3 +76,41 @@ def test_graph_returns_predecessors_and_successors():
 
     assert graph.predecessors(second.id) == [first]
     assert graph.successors(first.id) == [second]
+
+
+def test_graph_rejects_duplicate_step_ids_before_lookup():
+    first = ExecutionStep(id="same", action=ActionType.TOOL)
+    second = ExecutionStep(id="same", action=ActionType.TOOL)
+    graph = PlanningGraph(
+        ExecutionPlan(goal="Duplicate", steps=[first, second])
+    )
+
+    with pytest.raises(ValueError, match="Duplicate step ID"):
+        graph.validate()
+
+
+@pytest.mark.parametrize("step_id", ["", "   ", None])
+def test_graph_rejects_invalid_step_ids(step_id):
+    graph = PlanningGraph(
+        ExecutionPlan(
+            goal="Invalid",
+            steps=[ExecutionStep(id=step_id, action=ActionType.TOOL)],
+        )
+    )
+
+    with pytest.raises(ValueError, match="valid non-empty step ID"):
+        graph.validate()
+
+
+def test_graph_rejects_self_dependency():
+    step = ExecutionStep(
+        id="self",
+        action=ActionType.TOOL,
+        dependencies=["self"],
+    )
+    graph = PlanningGraph(
+        ExecutionPlan(goal="Self", steps=[step])
+    )
+
+    with pytest.raises(ValueError, match="cannot depend on itself"):
+        graph.validate()

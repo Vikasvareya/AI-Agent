@@ -5,6 +5,12 @@ below is planned unless explicitly marked **Current**. A milestone is complete
 only when its acceptance criteria are met and its status is updated in
 [Implementation Status](./IMPLEMENTATION_STATUS.md).
 
+The long-term direction is the
+[AI Brain Master Architecture](./AI_BRAIN_MASTER_ARCHITECTURE.md), which
+describes twelve future cognitive systems and explicitly separates implemented
+behavior from proposed research. This roadmap expands that architecture into
+evidence-gated engineering phases.
+
 ## Current foundation — partially implemented
 
 **Current:** Python framework modules, Ollama integration, chat/API, workflow

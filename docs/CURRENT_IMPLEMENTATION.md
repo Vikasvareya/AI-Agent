@@ -4,6 +4,11 @@ This document describes repository behavior observed in source and tests. It
 does not describe the target architecture. See [Known Limitations](./KNOWN_LIMITATIONS.md)
 for constraints that affect deployment and use.
 
+The target architecture is documented in
+[AI_BRAIN_MASTER_ARCHITECTURE.md](./AI_BRAIN_MASTER_ARCHITECTURE.md). It does
+not imply that future cognitive systems, self-evolution, model training,
+tool creation, or robotics are active.
+
 ## Runtime entry points
 
 - `python -m app.api.server_main` starts the API on port `8081` by default and
@@ -20,13 +25,20 @@ for constraints that affect deployment and use.
 | Providers | `BaseProvider`, Ollama, and an OpenAI-compatible Chat Completions adapter | Select one provider per server with `AI_AGENT_PROVIDER`; compatible endpoint support is limited to `/models` and `/chat/completions`. |
 | Planning | Intent matching/ranking and execution-plan data models | Not general model-driven planning. |
 | Execution | Registered actions/tools; plan steps execute sequentially | No isolated execution environment. |
+| Executor v2 lifecycle | PlanningGraph validates IDs/dependencies/cycles; ExecutionPlan executes sequentially with fail-fast and re-execution protection | No resume, retry, or distributed worker recovery. |
 | Chat | Authenticated and guest conversations through `ChatService` | Non-streaming request/response; RAG is not wired into API chat. |
+| Persistent user profile memory | Owner-scoped structured records in SQLite/PostgreSQL; explicit capture, pending confirmation, CRUD, and relevant prompt retrieval | No automatic extraction for all personal statements, vector memory, knowledge graphs, or historical versions. |
+| Resume draft generation | Deterministic chat resume draft assembled only from confirmed profile records; owner-scoped draft CRUD and text export | PDF/DOCX export and rendered templates are not implemented. |
+| Unified Agent Runtime | Browser and terminal chat share ToolPlanner, Executor, action handlers, tools, and per-conversation memory | Chat/RAG fallback remains provider-backed; CodingAgent is separate. |
+| Freshness-aware research | Bounded detection can automatically use configured Brave Search for clearly current-information questions | Static questions remain provider/chat fallback; unavailable search returns an honest limitation. |
 | Workflows | In-process DAG engine with bounded concurrency, retries, timeouts, cancellation, checkpoint callbacks, and approval gates | REST-created definitions and run snapshots, including approval/idempotency state, persist through `ChatStore`; interrupted runs fail closed on restart. Python callable workflows are not persisted, and execution is not coordinated across replicas. REST accepts only `value`, `context`, and `join` node types. |
 | Memory | Conversation history in SQLite/PostgreSQL; JSON long-term memory; in-memory token-frequency vector store | No learned embeddings or durable shared vector index. |
 | Coding workspace | Admin-only, workspace-scoped file inspection and proposals; explicit editor saves; patch review | The API persists owner-scoped pending proposals, permission mode, and hashed-actor audit events through `ChatStore`; applying proposals are invalidated on restart. No shell or external tool execution. |
 | Plugins | Python module discovery and registration; included math plugin | Imports execute Python in-process; no sandbox or signed registry. |
 | MCP | JSON-RPC-style protocol/server/client building blocks | Client transport is injected; no built-in stdio/HTTP transport or coding-agent invocation. |
 | Realtime | Bounded in-process event bus and HTTP SSE | No WebSocket transport or cross-process event distribution. |
+| Live chat activity | Real chat lifecycle events persist in SQLite/PostgreSQL and stream through the existing EventBus/SSE | UI shows only emitted stages; no fabricated progress or provider response streaming. |
+| Unified web research | Brave adapter, optional SearXNG adapter, provider manager, normalization/deduplication, and SSRF-safe direct text fetching | Direct fetch has no JavaScript rendering; live upstream availability depends on provider/network configuration. |
 | Observability | In-process tracing/metrics adapters and health routes | Readiness checks the configured provider and database; `/metrics` remains a static up gauge with no exporter or production alerting. |
 | Web search | Optional Brave Search, per-message opt-in and separate query terms | Requires server-side API key; live provider behavior depends on external service. |
 | Media/training | None | Image/video generation and model training are not implemented. |

@@ -59,6 +59,469 @@ class ChatStore:
         self._schema_lock = Lock()
         self._initialize()
 
+    def save_memory_record(
+        self,
+        owner_id: str,
+        *,
+        conversation_id: str | None,
+        category: str,
+        key: str,
+        value: str,
+        source: str,
+        confidence: float,
+        status: str,
+        metadata: dict | None = None,
+        expires_at: str | None = None,
+        record_id: str | None = None,
+    ) -> dict:
+        now = self._now()
+        record_id = record_id or str(uuid4())
+        metadata_json = json.dumps(
+            metadata or {},
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        confidence = max(0.0, min(1.0, float(confidence)))
+        with self._connection() as connection:
+            existing = self._execute(
+                connection,
+                """
+                SELECT id, value, status, created_at
+                FROM memory_records
+                WHERE owner_id = ? AND category = ? AND key = ?
+                    AND status != 'deleted'
+                LIMIT 1
+                """,
+                (owner_id, category, key),
+            ).fetchone()
+            if existing is not None:
+                if existing["value"] == value and existing["status"] == status:
+                    record_id = existing["id"]
+                else:
+                    record_id = existing["id"]
+            self._execute(
+                connection,
+                """
+                INSERT INTO memory_records
+                    (id, owner_id, conversation_id, category, key, value,
+                     source, confidence, status, created_at, updated_at,
+                     expires_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (id) DO UPDATE SET
+                    owner_id = excluded.owner_id,
+                    conversation_id = excluded.conversation_id,
+                    category = excluded.category,
+                    key = excluded.key,
+                    value = excluded.value,
+                    source = excluded.source,
+                    confidence = excluded.confidence,
+                    status = excluded.status,
+                    updated_at = excluded.updated_at,
+                    expires_at = excluded.expires_at,
+                    metadata = excluded.metadata
+                """,
+                (
+                    record_id,
+                    owner_id,
+                    conversation_id,
+                    category,
+                    key,
+                    value,
+                    source,
+                    confidence,
+                    status,
+                    existing["created_at"] if existing is not None else now,
+                    now,
+                    expires_at,
+                    metadata_json,
+                ),
+            )
+            row = self._execute(
+                connection,
+                """
+                SELECT id, owner_id, conversation_id, category, key, value,
+                       source, confidence, status, created_at, updated_at,
+                       expires_at, metadata
+                FROM memory_records
+                WHERE owner_id = ? AND id = ?
+                """,
+                (owner_id, record_id),
+            ).fetchone()
+        return self._memory_row(row)
+
+    def get_memory_record(self, owner_id: str, record_id: str) -> dict | None:
+        with self._connection() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT id, owner_id, conversation_id, category, key, value,
+                       source, confidence, status, created_at, updated_at,
+                       expires_at, metadata
+                FROM memory_records
+                WHERE owner_id = ? AND id = ? AND status != 'deleted'
+                """,
+                (owner_id, record_id),
+            ).fetchone()
+        return self._memory_row(row) if row is not None else None
+
+    def list_memory_records(
+        self,
+        owner_id: str,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+        query: str | None = None,
+    ) -> list[dict]:
+        limit = max(1, min(limit, 500))
+        now = self._now()
+        with self._connection() as connection:
+            clauses = ["owner_id = ?", "status != 'deleted'", "(expires_at IS NULL OR expires_at > ?)"]
+            params: list[object] = [owner_id, now]
+            if status:
+                clauses.append("status = ?")
+                params.append(status)
+            if query:
+                clauses.append("(category LIKE ? OR key LIKE ? OR value LIKE ?)")
+                pattern = f"%{query}%"
+                params.extend([pattern, pattern, pattern])
+            params.append(limit)
+            rows = self._execute(
+                connection,
+                """
+                SELECT id, owner_id, conversation_id, category, key, value,
+                       source, confidence, status, created_at, updated_at,
+                       expires_at, metadata
+                FROM memory_records
+                WHERE """ + " AND ".join(clauses) + """
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        return [self._memory_row(row) for row in rows]
+
+    def update_memory_record(
+        self,
+        owner_id: str,
+        record_id: str,
+        *,
+        value: str | None = None,
+        category: str | None = None,
+        key: str | None = None,
+        status: str | None = None,
+        expires_at: str | None = None,
+        metadata: dict | None = None,
+    ) -> dict | None:
+        record = self.get_memory_record(owner_id, record_id)
+        if record is None:
+            return None
+        now = self._now()
+        new_value = value if value is not None else record["value"]
+        with self._connection() as connection:
+            self._execute(
+                connection,
+                """
+                UPDATE memory_records
+                SET value = ?, category = ?, key = ?, status = ?,
+                    updated_at = ?, expires_at = ?, metadata = ?
+                WHERE owner_id = ? AND id = ?
+                """,
+                (
+                    new_value,
+                    category if category is not None else record["category"],
+                    key if key is not None else record["key"],
+                    status if status is not None else record["status"],
+                    now,
+                    expires_at,
+                    json.dumps(
+                        metadata if metadata is not None else record["metadata"],
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                    owner_id,
+                    record_id,
+                ),
+            )
+            if new_value != record["value"]:
+                self._execute(
+                    connection,
+                    """
+                    INSERT INTO memory_history
+                        (id, owner_id, record_id, conversation_id, category, key,
+                         previous_value, new_value, source, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(uuid4()),
+                        owner_id,
+                        record_id,
+                        record["conversation_id"],
+                        record["category"],
+                        record["key"],
+                        record["value"],
+                        new_value,
+                        "explicit_user_correction",
+                        now,
+                    ),
+                )
+        return self.get_memory_record(owner_id, record_id)
+
+    def delete_memory_record(self, owner_id: str, record_id: str) -> bool:
+        with self._connection() as connection:
+            cursor = self._execute(
+                connection,
+                "DELETE FROM memory_records WHERE owner_id = ? AND id = ?",
+                (owner_id, record_id),
+            )
+        return cursor.rowcount > 0
+
+    def clear_memory_records(self, owner_id: str) -> int:
+        with self._connection() as connection:
+            cursor = self._execute(
+                connection,
+                "DELETE FROM memory_records WHERE owner_id = ?",
+                (owner_id,),
+            )
+        return cursor.rowcount
+
+    def save_memory_correction(
+        self,
+        owner_id: str,
+        *,
+        record_id: str | None,
+        conversation_id: str | None,
+        category: str,
+        key: str,
+        proposed_value: str,
+    ) -> dict:
+        now = self._now()
+        correction = {
+            "id": str(uuid4()),
+            "owner_id": owner_id,
+            "record_id": record_id,
+            "conversation_id": conversation_id,
+            "category": category,
+            "key": key,
+            "proposed_value": proposed_value,
+            "status": "pending",
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self._connection() as connection:
+            self._execute(
+                connection,
+                """
+                INSERT INTO memory_corrections
+                    (id, owner_id, record_id, conversation_id, category, key,
+                     proposed_value, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    correction["id"],
+                    owner_id,
+                    record_id,
+                    conversation_id,
+                    category,
+                    key,
+                    proposed_value,
+                    "pending",
+                    now,
+                    now,
+                ),
+            )
+        return correction
+
+    def get_pending_memory_correction(self, owner_id: str) -> dict | None:
+        with self._connection() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT id, owner_id, record_id, conversation_id, category, key,
+                       proposed_value, status, created_at, updated_at
+                FROM memory_corrections
+                WHERE owner_id = ? AND status = 'pending'
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (owner_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def confirm_pending_memory_correction(self, owner_id: str) -> dict | None:
+        correction = self.get_pending_memory_correction(owner_id)
+        if correction is None:
+            return None
+        if correction["record_id"]:
+            record = self.update_memory_record(
+                owner_id,
+                correction["record_id"],
+                value=correction["proposed_value"],
+                status="confirmed",
+                metadata={"confirmed_by": "user", "correction": True},
+            )
+        else:
+            record = self.save_memory_record(
+                owner_id,
+                conversation_id=correction["conversation_id"],
+                category=correction["category"],
+                key=correction["key"],
+                value=correction["proposed_value"],
+                source="explicit_user_correction",
+                confidence=1.0,
+                status="confirmed",
+                metadata={"confirmed_by": "user", "correction": True},
+            )
+        now = self._now()
+        with self._connection() as connection:
+            self._execute(
+                connection,
+                """
+                UPDATE memory_corrections
+                SET status = 'confirmed', updated_at = ?
+                WHERE owner_id = ? AND id = ? AND status = 'pending'
+                """,
+                (now, owner_id, correction["id"]),
+            )
+        return record
+
+    def reject_pending_memory_correction(self, owner_id: str) -> bool:
+        correction = self.get_pending_memory_correction(owner_id)
+        if correction is None:
+            return False
+        now = self._now()
+        with self._connection() as connection:
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE memory_corrections
+                SET status = 'rejected', updated_at = ?
+                WHERE owner_id = ? AND id = ? AND status = 'pending'
+                """,
+                (now, owner_id, correction["id"]),
+            )
+        return cursor.rowcount > 0
+
+    def list_memory_history(self, owner_id: str, record_id: str | None = None) -> list[dict]:
+        with self._connection() as connection:
+            if record_id:
+                rows = self._execute(
+                    connection,
+                    """
+                    SELECT id, owner_id, record_id, conversation_id, category, key,
+                           previous_value, new_value, source, created_at
+                    FROM memory_history
+                    WHERE owner_id = ? AND record_id = ?
+                    ORDER BY created_at DESC, id DESC
+                    """,
+                    (owner_id, record_id),
+                ).fetchall()
+            else:
+                rows = self._execute(
+                    connection,
+                    """
+                    SELECT id, owner_id, record_id, conversation_id, category, key,
+                           previous_value, new_value, source, created_at
+                    FROM memory_history
+                    WHERE owner_id = ?
+                    ORDER BY created_at DESC, id DESC
+                    """,
+                    (owner_id,),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def save_resume_draft(
+        self,
+        owner_id: str,
+        *,
+        title: str,
+        content: str,
+        status: str = "draft",
+        draft_id: str | None = None,
+    ) -> dict:
+        if status not in ("draft", "edited", "approved"):
+            raise ValueError("Invalid resume draft status.")
+        now = self._now()
+        draft_id = draft_id or str(uuid4())
+        with self._connection() as connection:
+            self._execute(
+                connection,
+                """
+                INSERT INTO resume_drafts
+                    (id, owner_id, title, content, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (id) DO UPDATE SET
+                    title = excluded.title,
+                    content = excluded.content,
+                    status = excluded.status,
+                    updated_at = excluded.updated_at
+                """,
+                (draft_id, owner_id, title.strip(), content.strip(), status, now, now),
+            )
+            row = self._execute(
+                connection,
+                """
+                SELECT id, owner_id, title, content, status, created_at, updated_at
+                FROM resume_drafts
+                WHERE owner_id = ? AND id = ?
+                """,
+                (owner_id, draft_id),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_resume_draft(self, owner_id: str, draft_id: str) -> dict | None:
+        with self._connection() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT id, owner_id, title, content, status, created_at, updated_at
+                FROM resume_drafts
+                WHERE owner_id = ? AND id = ?
+                """,
+                (owner_id, draft_id),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_resume_drafts(self, owner_id: str) -> list[dict]:
+        with self._connection() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT id, owner_id, title, content, status, created_at, updated_at
+                FROM resume_drafts
+                WHERE owner_id = ?
+                ORDER BY updated_at DESC, id DESC
+                """,
+                (owner_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_resume_draft(self, owner_id: str, draft_id: str) -> bool:
+        with self._connection() as connection:
+            cursor = self._execute(
+                connection,
+                "DELETE FROM resume_drafts WHERE owner_id = ? AND id = ?",
+                (owner_id, draft_id),
+            )
+        return cursor.rowcount > 0
+
+    @staticmethod
+    def _memory_row(row) -> dict:
+        return {
+            "id": row["id"],
+            "owner_id": row["owner_id"],
+            "conversation_id": row["conversation_id"],
+            "category": row["category"],
+            "key": row["key"],
+            "value": row["value"],
+            "source": row["source"],
+            "confidence": row["confidence"],
+            "status": row["status"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "expires_at": row["expires_at"],
+            "metadata": json.loads(row["metadata"]),
+        }
+
     def create_conversation(
         self,
         owner_id: str,
@@ -1232,6 +1695,570 @@ class ChatStore:
             for row in rows
         ]
 
+    def save_delegation_task(self, task: dict) -> None:
+        required = (
+            "id",
+            "owner_id",
+            "requester_role",
+            "agent_name",
+            "prompt",
+            "status",
+            "result",
+            "error",
+            "created_at",
+            "updated_at",
+        )
+        if any(key not in task for key in required):
+            raise ValueError("Delegation task snapshot is incomplete.")
+        with self._connection() as connection:
+            self._execute(
+                connection,
+                """
+                INSERT INTO delegation_tasks
+                    (id, owner_id, requester_role, agent_name, prompt,
+                     status, result, error, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (id) DO UPDATE SET
+                    owner_id = excluded.owner_id,
+                    requester_role = excluded.requester_role,
+                    agent_name = excluded.agent_name,
+                    prompt = excluded.prompt,
+                    status = excluded.status,
+                    result = excluded.result,
+                    error = excluded.error,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    task["id"],
+                    task["owner_id"],
+                    task["requester_role"],
+                    task["agent_name"],
+                    task["prompt"],
+                    task["status"],
+                    task["result"],
+                    task["error"],
+                    task["created_at"],
+                    task["updated_at"],
+                ),
+            )
+
+    def get_delegation_task(
+        self,
+        owner_id: str,
+        task_id: str,
+    ) -> dict | None:
+        with self._connection() as connection:
+            row = self._execute(
+                connection,
+                """
+                SELECT id, owner_id, requester_role, agent_name, prompt,
+                       status, result, error, created_at, updated_at
+                FROM delegation_tasks
+                WHERE owner_id = ? AND id = ?
+                """,
+                (owner_id, task_id),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_delegation_tasks(
+        self,
+        owner_id: str,
+        limit: int = 100,
+    ) -> list[dict]:
+        limit = max(1, min(limit, 500))
+        with self._connection() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT id, owner_id, requester_role, agent_name, prompt,
+                       status, result, error, created_at, updated_at
+                FROM delegation_tasks
+                WHERE owner_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (owner_id, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def enqueue_delegation_task(self, task: dict) -> None:
+        required = (
+            "id", "owner_id", "requester_role", "agent_name",
+            "prompt", "status", "result", "error",
+            "created_at", "updated_at",
+        )
+        if any(key not in task for key in required):
+            raise ValueError("Delegation task snapshot is incomplete.")
+        self.save_delegation_task(task)
+        now = self._now()
+        with self._connection() as connection:
+            self._execute(
+                connection,
+                """
+                INSERT INTO delegation_queue
+                    (task_id, queue_status, worker_id, lease_expires_at,
+                     attempts, max_attempts, created_at, updated_at)
+                VALUES (?, 'queued', NULL, NULL, 0, 3, ?, ?)
+                ON CONFLICT (task_id) DO NOTHING
+                """,
+                (task["id"], now, now),
+            )
+
+    def lease_delegation_task(
+        self,
+        worker_id: str,
+        *,
+        lease_seconds: int = 60,
+    ) -> dict | None:
+        if not isinstance(worker_id, str) or not worker_id.strip():
+            raise ValueError("Worker ID is required.")
+        lease_seconds = max(1, min(lease_seconds, 3600))
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        lease_expires = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
+        with self._connection() as connection:
+            if not self._postgres:
+                self._execute(connection, "BEGIN IMMEDIATE")
+            candidate = self._execute(
+                connection,
+                """
+                SELECT task_id, attempts, max_attempts
+                FROM delegation_queue
+                WHERE queue_status = 'queued'
+                   OR (queue_status = 'leased'
+                       AND (lease_expires_at IS NULL OR lease_expires_at <= ?))
+                ORDER BY created_at, task_id
+                LIMIT 1
+                """,
+                (now,),
+            ).fetchone()
+            if candidate is None:
+                if not self._postgres:
+                    connection.commit()
+                return None
+            task_id = candidate["task_id"]
+            attempts = int(candidate["attempts"]) + 1
+            leased = self._execute(
+                connection,
+                """
+                UPDATE delegation_queue
+                SET queue_status = 'leased', worker_id = ?, lease_expires_at = ?,
+                    attempts = ?, updated_at = ?
+                WHERE task_id = ? AND (
+                    queue_status = 'queued'
+                    OR (queue_status = 'leased'
+                        AND (lease_expires_at IS NULL OR lease_expires_at <= ?))
+                )
+                """,
+                (worker_id, lease_expires, attempts, now, task_id, now),
+            )
+            if leased.rowcount == 0:
+                if not self._postgres:
+                    connection.commit()
+                return None
+            if attempts > int(candidate["max_attempts"]):
+                self._execute(
+                    connection,
+                    """
+                    UPDATE delegation_queue
+                    SET queue_status = 'failed', worker_id = NULL,
+                        lease_expires_at = NULL, updated_at = ?
+                    WHERE task_id = ? AND queue_status = 'leased' AND worker_id = ?
+                    """,
+                    (now, task_id, worker_id),
+                )
+                self._execute(
+                    connection,
+                    """
+                    UPDATE delegation_tasks
+                    SET status = 'failed',
+                        error = 'Maximum task attempts exceeded.',
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (now, task_id),
+                )
+                if not self._postgres:
+                    connection.commit()
+                return None
+            self._execute(
+                connection,
+                """
+                UPDATE delegation_tasks
+                SET status = 'running', updated_at = ?
+                WHERE id = ?
+                """,
+                (now, task_id),
+            )
+            task = self._execute(
+                connection,
+                """
+                SELECT id, owner_id, requester_role, agent_name, prompt,
+                       status, result, error, created_at, updated_at
+                FROM delegation_tasks
+                WHERE id = ?
+                """,
+                (task_id,),
+            ).fetchone()
+        return dict(task) if task is not None else None
+
+    def renew_delegation_lease(
+        self,
+        task_id: str,
+        worker_id: str,
+        *,
+        lease_seconds: int = 60,
+    ) -> bool:
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        lease_expires = (
+            now_dt + timedelta(seconds=max(1, min(lease_seconds, 3600)))
+        ).isoformat()
+        with self._connection() as connection:
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE delegation_queue
+                SET lease_expires_at = ?, updated_at = ?
+                WHERE task_id = ? AND queue_status = 'leased' AND worker_id = ?
+                """,
+                (lease_expires, now, task_id, worker_id),
+            )
+        return cursor.rowcount > 0
+
+    def retry_delegation_task(
+        self,
+        task_id: str,
+        worker_id: str,
+        *,
+        error: str,
+    ) -> bool:
+        now = self._now()
+        with self._connection() as connection:
+            queue = self._execute(
+                connection,
+                """
+                SELECT attempts, max_attempts
+                FROM delegation_queue
+                WHERE task_id = ? AND queue_status = 'leased' AND worker_id = ?
+                """,
+                (task_id, worker_id),
+            ).fetchone()
+            if queue is None:
+                return False
+            if int(queue["attempts"]) >= int(queue["max_attempts"]):
+                status = "failed"
+                queue_status = "failed"
+            else:
+                status = "pending"
+                queue_status = "queued"
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE delegation_queue
+                SET queue_status = ?, worker_id = NULL,
+                    lease_expires_at = NULL, updated_at = ?
+                WHERE task_id = ? AND queue_status = 'leased' AND worker_id = ?
+                """,
+                (queue_status, now, task_id, worker_id),
+            )
+            if cursor.rowcount == 0:
+                return False
+            self._execute(
+                connection,
+                """
+                UPDATE delegation_tasks
+                SET status = ?, error = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (status, error, now, task_id),
+            )
+        return True
+
+    def complete_delegation_task(
+        self,
+        task_id: str,
+        worker_id: str,
+        *,
+        result: str | None,
+        error: str | None,
+    ) -> bool:
+        now = self._now()
+        status = "failed" if error else "completed"
+        with self._connection() as connection:
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE delegation_queue
+                SET queue_status = ?, worker_id = NULL,
+                    lease_expires_at = NULL, updated_at = ?
+                WHERE task_id = ? AND queue_status = 'leased' AND worker_id = ?
+                """,
+                (status, now, task_id, worker_id),
+            )
+            if cursor.rowcount == 0:
+                return False
+            self._execute(
+                connection,
+                """
+                UPDATE delegation_tasks
+                SET status = ?, result = ?, error = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (status, result, error, now, task_id),
+            )
+        return True
+
+    def cancel_delegation_task(self, owner_id: str, task_id: str) -> bool:
+        now = self._now()
+        with self._connection() as connection:
+            task = self._execute(
+                connection,
+                """
+                SELECT id, status FROM delegation_tasks
+                WHERE owner_id = ? AND id = ?
+                """,
+                (owner_id, task_id),
+            ).fetchone()
+            if task is None or task["status"] in ("completed", "failed", "cancelled"):
+                return False
+            self._execute(
+                connection,
+                """
+                UPDATE delegation_queue
+                SET queue_status = 'cancelled', worker_id = NULL,
+                    lease_expires_at = NULL, updated_at = ?
+                WHERE task_id = ? AND queue_status IN ('queued', 'leased')
+                """,
+                (now, task_id),
+            )
+            self._execute(
+                connection,
+                """
+                UPDATE delegation_tasks
+                SET status = 'cancelled', updated_at = ?
+                WHERE owner_id = ? AND id = ?
+                """,
+                (now, owner_id, task_id),
+            )
+        return True
+
+    def recover_stale_delegation_tasks(self) -> int:
+        now = self._now()
+        with self._connection() as connection:
+            cursor = self._execute(
+                connection,
+                """
+                UPDATE delegation_queue
+                SET queue_status = 'queued', worker_id = NULL,
+                    lease_expires_at = NULL, updated_at = ?
+                WHERE queue_status = 'leased'
+                  AND lease_expires_at IS NOT NULL
+                  AND lease_expires_at <= ?
+                """,
+                (now, now),
+            )
+            recovered = cursor.rowcount
+        return recovered
+
+    def save_delegation_message(self, message: dict) -> None:
+        required = ("id", "task_id", "sender", "recipient", "content", "created_at")
+        if any(key not in message for key in required):
+            raise ValueError("Delegation message is incomplete.")
+        with self._connection() as connection:
+            self._execute(
+                connection,
+                """
+                INSERT INTO delegation_messages
+                    (id, task_id, sender, recipient, content, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                (
+                    message["id"],
+                    message["task_id"],
+                    message["sender"],
+                    message["recipient"],
+                    message["content"],
+                    message["created_at"],
+                ),
+            )
+
+    def list_delegation_messages(
+        self,
+        owner_id: str,
+        task_id: str,
+    ) -> list[dict]:
+        with self._connection() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT m.id, m.task_id, m.sender, m.recipient,
+                       m.content, m.created_at
+                FROM delegation_messages m
+                JOIN delegation_tasks t ON t.id = m.task_id
+                WHERE t.owner_id = ? AND m.task_id = ?
+                ORDER BY m.created_at, m.id
+                """,
+                (owner_id, task_id),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_activity_event(
+        self,
+        owner_id: str,
+        event: dict,
+    ) -> dict:
+        required = (
+            "event_id",
+            "run_id",
+            "conversation_id",
+            "event_type",
+            "status",
+            "summary",
+            "timestamp",
+            "visibility",
+        )
+        if any(key not in event for key in required):
+            raise ValueError("Activity event is missing required fields.")
+        if event["visibility"] not in ("user", "operator"):
+            raise ValueError("Activity event visibility is invalid.")
+        with self._connection() as connection:
+            if not self._postgres:
+                self._execute(connection, "BEGIN IMMEDIATE")
+            existing = self._execute(
+                connection,
+                """
+                SELECT id, run_id, conversation_id, task_id, agent_id,
+                       parent_task_id, event_type, status, summary,
+                       timestamp, sequence_number, visibility, metadata
+                FROM agent_activity_events
+                WHERE owner_id = ? AND id = ?
+                """,
+                (owner_id, event["event_id"]),
+            ).fetchone()
+            if existing is not None:
+                return {
+                    "event_id": existing["id"],
+                    "run_id": existing["run_id"],
+                    "conversation_id": existing["conversation_id"],
+                    "task_id": existing["task_id"],
+                    "agent_id": existing["agent_id"],
+                    "parent_task_id": existing["parent_task_id"],
+                    "event_type": existing["event_type"],
+                    "status": existing["status"],
+                    "summary": existing["summary"],
+                    "timestamp": existing["timestamp"],
+                    "sequence_number": existing["sequence_number"],
+                    "visibility": existing["visibility"],
+                    "metadata": json.loads(existing["metadata"]),
+                }
+            row = self._execute(
+                connection,
+                """
+                SELECT COALESCE(MAX(sequence_number), 0)
+                FROM agent_activity_events
+                WHERE owner_id = ? AND conversation_id = ?
+                """,
+                (owner_id, event["conversation_id"]),
+            ).fetchone()
+            maximum = row[0]
+            sequence_number = int(maximum) + 1
+            metadata = json.dumps(
+                event.get("metadata", {}),
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            self._execute(
+                connection,
+                """
+                INSERT INTO agent_activity_events
+                    (id, owner_id, run_id, conversation_id, task_id,
+                     agent_id, parent_task_id, event_type, status, summary,
+                     timestamp, sequence_number, visibility, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                (
+                    event["event_id"],
+                    owner_id,
+                    event["run_id"],
+                    event["conversation_id"],
+                    event.get("task_id"),
+                    event.get("agent_id"),
+                    event.get("parent_task_id"),
+                    event["event_type"],
+                    event["status"],
+                    event["summary"],
+                    event["timestamp"],
+                    sequence_number,
+                    event["visibility"],
+                    metadata,
+                ),
+            )
+        persisted = {
+            **event,
+            "sequence_number": sequence_number,
+        }
+        return persisted
+
+    def list_activity_events(
+        self,
+        owner_id: str,
+        conversation_id: str,
+        *,
+        run_id: str | None = None,
+        limit: int = 500,
+    ) -> list[dict]:
+        limit = max(1, min(limit, 1000))
+        with self._connection() as connection:
+            if run_id:
+                rows = self._execute(
+                    connection,
+                    """
+                    SELECT id, run_id, conversation_id, task_id, agent_id,
+                           parent_task_id, event_type, status, summary,
+                           timestamp, sequence_number, visibility, metadata
+                    FROM agent_activity_events
+                    WHERE owner_id = ? AND conversation_id = ? AND run_id = ?
+                    ORDER BY sequence_number, id
+                    LIMIT ?
+                    """,
+                    (owner_id, conversation_id, run_id, limit),
+                ).fetchall()
+            else:
+                rows = self._execute(
+                    connection,
+                    """
+                    SELECT id, run_id, conversation_id, task_id, agent_id,
+                           parent_task_id, event_type, status, summary,
+                           timestamp, sequence_number, visibility, metadata
+                    FROM agent_activity_events
+                    WHERE owner_id = ? AND conversation_id = ?
+                    ORDER BY sequence_number, id
+                    LIMIT ?
+                    """,
+                    (owner_id, conversation_id, limit),
+                ).fetchall()
+        return [
+            {
+                "event_id": row["id"],
+                "run_id": row["run_id"],
+                "conversation_id": row["conversation_id"],
+                "task_id": row["task_id"],
+                "agent_id": row["agent_id"],
+                "parent_task_id": row["parent_task_id"],
+                "event_type": row["event_type"],
+                "status": row["status"],
+                "summary": row["summary"],
+                "timestamp": row["timestamp"],
+                "sequence_number": row["sequence_number"],
+                "visibility": row["visibility"],
+                "metadata": json.loads(row["metadata"]),
+            }
+            for row in rows
+        ]
+
     def save_workflow_run(
         self,
         run_id: str,
@@ -1609,6 +2636,113 @@ class ChatStore:
                     )
                     """,
                     """
+                    CREATE TABLE IF NOT EXISTS memory_records (
+                        id TEXT PRIMARY KEY,
+                        owner_id TEXT NOT NULL,
+                        conversation_id TEXT,
+                        category TEXT NOT NULL,
+                        key TEXT NOT NULL,
+                        value TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        confidence REAL NOT NULL,
+                        status TEXT NOT NULL
+                            CHECK (status IN ('confirmed', 'pending_confirmation',
+                                              'rejected', 'expired', 'deleted')),
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        expires_at TEXT,
+                        metadata TEXT NOT NULL
+                    )
+                    """,
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                        idx_memory_records_owner_status
+                    ON memory_records (owner_id, status, updated_at DESC)
+                    """,
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                        idx_memory_records_owner_category_key
+                    ON memory_records (owner_id, category, key)
+                    """,
+                    """
+                    CREATE TABLE IF NOT EXISTS memory_history (
+                        id TEXT PRIMARY KEY,
+                        owner_id TEXT NOT NULL,
+                        record_id TEXT NOT NULL,
+                        conversation_id TEXT,
+                        category TEXT NOT NULL,
+                        key TEXT NOT NULL,
+                        previous_value TEXT,
+                        new_value TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    )
+                    """,
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                        idx_memory_history_owner_created
+                    ON memory_history (owner_id, created_at DESC)
+                    """,
+                    """
+                    CREATE TABLE IF NOT EXISTS memory_corrections (
+                        id TEXT PRIMARY KEY,
+                        owner_id TEXT NOT NULL,
+                        record_id TEXT,
+                        conversation_id TEXT,
+                        category TEXT NOT NULL,
+                        key TEXT NOT NULL,
+                        proposed_value TEXT NOT NULL,
+                        status TEXT NOT NULL
+                            CHECK (status IN ('pending', 'confirmed', 'rejected')),
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """,
+                    """
+                    CREATE TABLE IF NOT EXISTS resume_drafts (
+                        id TEXT PRIMARY KEY,
+                        owner_id TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        status TEXT NOT NULL
+                            CHECK (status IN ('draft', 'edited', 'approved')),
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """,
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_activity_events (
+                        id TEXT PRIMARY KEY,
+                        owner_id TEXT NOT NULL,
+                        run_id TEXT NOT NULL,
+                        conversation_id TEXT NOT NULL,
+                        task_id TEXT,
+                        agent_id TEXT,
+                        parent_task_id TEXT,
+                        event_type TEXT NOT NULL,
+                        status TEXT NOT NULL
+                            CHECK (status IN ('pending', 'running', 'completed',
+                                              'failed', 'skipped', 'cancelled')),
+                        summary TEXT NOT NULL,
+                        timestamp TEXT NOT NULL,
+                        sequence_number INTEGER NOT NULL,
+                        visibility TEXT NOT NULL
+                            CHECK (visibility IN ('user', 'operator')),
+                        metadata TEXT NOT NULL
+                    )
+                    """,
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                        idx_agent_activity_owner_conversation_sequence
+                    ON agent_activity_events (owner_id, conversation_id,
+                                               sequence_number)
+                    """,
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                        idx_agent_activity_run_sequence
+                    ON agent_activity_events (run_id, sequence_number)
+                    """,
+                    """
                     CREATE TABLE IF NOT EXISTS coding_sessions (
                         id TEXT PRIMARY KEY,
                         owner_id TEXT NOT NULL,
@@ -1678,6 +2812,62 @@ class ChatStore:
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL
                     )
+                    """,
+                    """
+                    CREATE TABLE IF NOT EXISTS delegation_tasks (
+                        id TEXT PRIMARY KEY,
+                        owner_id TEXT NOT NULL,
+                        requester_role TEXT NOT NULL,
+                        agent_name TEXT NOT NULL,
+                        prompt TEXT NOT NULL,
+                        status TEXT NOT NULL
+                            CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+                        result TEXT,
+                        error TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """,
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                        idx_delegation_tasks_owner_created
+                    ON delegation_tasks (owner_id, created_at DESC)
+                    """,
+                    """
+                    CREATE TABLE IF NOT EXISTS delegation_messages (
+                        id TEXT PRIMARY KEY,
+                        task_id TEXT NOT NULL
+                            REFERENCES delegation_tasks(id) ON DELETE CASCADE,
+                        sender TEXT NOT NULL,
+                        recipient TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    )
+                    """,
+                    """
+                    CREATE TABLE IF NOT EXISTS delegation_queue (
+                        task_id TEXT PRIMARY KEY
+                            REFERENCES delegation_tasks(id) ON DELETE CASCADE,
+                        queue_status TEXT NOT NULL
+                            CHECK (queue_status IN ('queued', 'leased', 'completed',
+                                                    'failed', 'cancelled')),
+                        worker_id TEXT,
+                        lease_expires_at TEXT,
+                        attempts INTEGER NOT NULL,
+                        max_attempts INTEGER NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """,
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                        idx_delegation_queue_status_created
+                    ON delegation_queue (queue_status, created_at)
+                    """,
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                        idx_delegation_messages_task_created
+                    ON delegation_messages (task_id, created_at, id)
                     """,
                     """
                     CREATE TABLE IF NOT EXISTS api_credentials (

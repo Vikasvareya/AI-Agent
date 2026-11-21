@@ -3,6 +3,11 @@
 Thanks for helping improve the framework. Keep changes scoped, documented,
 tested, and explicit about whether a capability is implemented or proposed.
 
+Development work is guided by the repository-level
+[AGENTS.md](../AGENTS.md), the
+[AI Brain Master Architecture](./AI_BRAIN_MASTER_ARCHITECTURE.md), and the
+[Shared Agent Constitution](./AGENT_CONSTITUTION.md).
+
 ## Development setup
 
 PowerShell from the repository root:

@@ -14,3 +14,4 @@ class ConversationContext:
     last_file: str | None = None
     last_tool: str | None = None
     last_location: str | None = None
+    last_action: str | None = None

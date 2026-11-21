@@ -219,7 +219,7 @@ export function SharedCodingSession({ token }: { token: string }) {
     >
       <header>
         <a href={`${import.meta.env.BASE_URL}coding/`}>
-          AI Agent · Coding workspace
+          AI Brain · Coding workspace
         </a>
         <span>Read-only shared session</span>
       </header>
@@ -1402,9 +1402,9 @@ export default function CodingDashboard() {
       data-reduce-motion={appearance.reduceMotion}
     >
       <header className="coding-appbar">
-        <a className="coding-window-brand" href="/chat/" aria-label="AI Agent home">
+        <a className="coding-window-brand" href="/chat/" aria-label="AI Brain home">
           <span className="coding-brand-mark"><Sparkles size={16} aria-hidden="true" /></span>
-          <strong>AI Agent</strong>
+          <strong>AI Brain</strong>
         </a>
         <button
           type="button"
@@ -1835,7 +1835,7 @@ export default function CodingDashboard() {
                         {message.role === "user" ? "You" : <Sparkles size={14} aria-hidden="true" />}
                       </span>
                       <div className="coding-message-body">
-                        <strong>{message.role === "user" ? "You" : "AI Agent"}</strong>
+                        <strong>{message.role === "user" ? "You" : "AI Brain"}</strong>
                         <pre>{message.content}</pre>
                       </div>
                     </article>
@@ -2466,7 +2466,7 @@ export default function CodingDashboard() {
                 </>
               )}
               {settingsSection === "Application" && (
-                <div className="coding-setting-note"><strong>Local AI Agent workspace</strong><p>Project files stay under the configured workspace root. Sessions use the configured chat database. The API reports {available ? "workspace connected" : "workspace unavailable"}.</p></div>
+                <div className="coding-setting-note"><strong>Local AI Brain coding workspace</strong><p>Project files stay under the configured workspace root. Sessions use the configured chat database. The API reports {available ? "workspace connected" : "workspace unavailable"}.</p></div>
               )}
               {settingsSection === "Appearance" && (
                 <>
@@ -2811,7 +2811,7 @@ export default function CodingDashboard() {
                     ? "Choose project location"
                     : "Add existing project"}
                 </h2>
-                <p>Select a folder on the computer running the AI Agent server.</p>
+                <p>Select a folder on the computer running the AI Brain server.</p>
               </div>
               <button
                 type="button"

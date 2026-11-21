@@ -4,6 +4,9 @@ This list describes current constraints, not a complete security assessment.
 See [Security and Governance](./SECURITY_AND_GOVERNANCE.md) for risks and
 required controls.
 
+AI Brain is an architectural target. It does not change the current limitations
+below or turn proposed systems into implemented capabilities.
+
 ## Runtime and scaling
 
 - The API is a standard-library threaded HTTP server, not a measured
@@ -24,6 +27,11 @@ required controls.
   configurable with `AI_AGENT_AUDIT_RETENTION_DAYS=0` to disable pruning;
   coverage is expanding beyond workflow and coding actions.
 - Event subscribers remain in process memory.
+- Live chat activity history persists in SQLite/PostgreSQL, but SSE delivery
+  remains process-local and has no cross-replica replay fan-out.
+- The durable agent queue has conditional leasing, heartbeat renewal, stale
+  recovery, bounded retries, and cancellation. It remains process-local at
+  startup and has not been load/failover tested across PostgreSQL replicas.
 - When `ChatStore` is configured, IP counters use the shared database; standalone
   servers without `ChatStore` still use process-local counters.
 - PostgreSQL persists chat/session and REST-workflow records; its connection
@@ -38,14 +46,26 @@ required controls.
 
 - Provider factory supports Ollama and an OpenAI-compatible Chat Completions
   API. Other provider-specific APIs and streaming are not implemented.
+- Provider failures include a correlation ID in the user-facing error and
+  preserve conversation/message state. Resume drafts are deterministic from
+  confirmed profile records; provider-generated resume prose is not silently
+  used to invent facts.
 - Planner intent selection is largely rule/registry based. ReAct and
   reflective agents are bounded prototypes, not general model-driven
   autonomous reasoning.
-- The multi-agent coordinator selects a single agent; it does not provide
-  parallel fan-out or durable task handoffs.
+- Executor v2 rejects completed, failed, partially executed, and concurrently
+  running ExecutionPlan instances. It has no resume or replay policy. ReAct
+  and Reflective agents do not retry ExecutionPlan instances.
+- The multi-agent coordinator now persists structured task and message records
+  and supports bounded parallel fan-out, but execution and handoffs remain
+  process-local; there is no distributed worker, lease, cancellation, or
+  cross-replica result queue.
 - Vector memory uses normalized token-frequency vectors in process memory;
   it is not an embedding database.
 - RAG is connected to the CLI path, not API chat.
+- Browser chat uses conversation-scoped runtime memory reconstructed from
+  `ChatStore` history. RAG remains separate and API chat is not yet connected
+  to the CLI RAG pipeline.
 - Image/video generation and model training/fine-tuning are not implemented.
 
 ## Coding workspace and integrations

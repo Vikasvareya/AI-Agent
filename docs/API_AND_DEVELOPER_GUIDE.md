@@ -37,6 +37,28 @@ auth. Local loopback development may continue without tokens. See the safe
 Use placeholders in examples and keep actual credentials in an approved
 secret store or process environment. Do not commit `.env` values.
 
+## Multi-agent delegation
+
+Authenticated callers can submit `POST /v1/agents/delegate` with:
+
+```json
+{"agents":["chat","coding"],"prompt":"Analyze this request","max_parallel":8}
+```
+
+The server rejects unauthorized agent names through a role policy, persists
+owner-scoped task and message records in `ChatStore`, and returns a completed,
+partial, or failed result aggregation. `GET /v1/agent-tasks` lists the caller's
+tasks; `GET /v1/agent-tasks/{task_id}` includes structured messages.
+
+By default, execution remains synchronous. Set `"async": true` to persist the
+task in the durable queue and return immediately. The current server worker
+claims leased tasks, renews/releases them through the store, retries bounded
+failures, recovers stale leases, and supports
+`POST /v1/agent-tasks/{task_id}/cancel`.
+Workers renew long-running leases and stale expired leases are requeued for
+bounded retries. Conditional lease acquisition prevents two workers from
+claiming the same queue row.
+
 ## API groups
 
 The current API includes:

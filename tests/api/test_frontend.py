@@ -24,7 +24,7 @@ def test_dashboard_and_demo_workflow_listing():
         ) as response:
             html = response.read().decode("utf-8")
             assert response.status == 200
-            assert "AI Agent Control Plane" in html
+            assert "AI Brain Control Plane" in html
 
         with urllib.request.urlopen(
             f"http://127.0.0.1:{port}/v1/workflows",

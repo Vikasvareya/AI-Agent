@@ -17,6 +17,13 @@ class EntityExtractor:
         Extract the primary entity from the prompt.
         """
 
+        if re.search(
+            r"\b(?:date|time|clock|today|tomorrow|yesterday)\b",
+            prompt,
+            flags=re.IGNORECASE,
+        ):
+            return None
+
         patterns = [
             r"tell me about\s+(.+)",
             r"who is\s+(.+)",

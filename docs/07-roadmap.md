@@ -9,3 +9,6 @@ See the current [Product Roadmap](./PRODUCT_ROADMAP.md),
 [Known Limitations](./KNOWN_LIMITATIONS.md). In particular, MCP transports,
 durable workflows, production observability, and high-availability operation
 are not complete capabilities.
+
+The twelve-system AI Brain target is maintained in
+[AI_BRAIN_MASTER_ARCHITECTURE.md](./AI_BRAIN_MASTER_ARCHITECTURE.md).

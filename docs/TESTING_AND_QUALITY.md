@@ -38,11 +38,13 @@ be run by subsystem, for example `python -m pytest tests/api -q`.
   horizontally consistent execution.
 - Treat frontend build success as compilation evidence, not full UI or
   accessibility validation.
+- Executor changes require dependency-validation, fail-fast lifecycle,
+  typed argument-resolution, re-execution, and legacy-agent retry coverage.
 
 ## Current evidence and gaps
 
-The backend suite has most recently passed with 156 tests and one upstream
-AnyIO/pytest deprecation warning. GitHub Actions runs the backend suite,
+The backend suite is measured per run and should be reported from the actual
+completed command. GitHub Actions runs the backend suite,
 frontend production build, full-history Gitleaks scan, Compose configuration
 validation, application container build/startup smoke test, and Kubernetes
 manifest schema validation on pushes and pull requests. The scanners are

@@ -1,4 +1,5 @@
 from app.realtime.event_bus import EventBus
+from app.realtime.models import AgentActivityEvent
 from app.workflows.engine import WorkflowEngine
 from app.workflows.models import Workflow, WorkflowNode
 
@@ -74,3 +75,24 @@ def test_workflow_engine_publishes_status_events():
     assert run.status.value == "completed"
     assert events
     assert events[-1].payload["status"] == "completed"
+
+
+def test_activity_event_is_delivered_through_existing_bus():
+    bus = EventBus()
+    subscription = bus.subscribe(run_id="chat-run-1")
+    event = AgentActivityEvent(
+        run_id="chat-run-1",
+        conversation_id="conversation-1",
+        event_type="cognitive.perception.completed",
+        status="completed",
+        summary="Request understood.",
+        sequence_number=1,
+    )
+
+    bus.publish_activity(event)
+    events = bus.consume(subscription)
+
+    assert len(events) == 1
+    assert events[0].event_type == "cognitive.perception.completed"
+    assert events[0].payload["conversation_id"] == "conversation-1"
+    assert events[0].payload["summary"] == "Request understood."

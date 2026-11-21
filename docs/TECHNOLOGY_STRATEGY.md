@@ -1,5 +1,11 @@
 # Technology Strategy
 
+Technology choices below support the current foundation and may inform the
+AI Brain target described in
+[AI_BRAIN_MASTER_ARCHITECTURE.md](./AI_BRAIN_MASTER_ARCHITECTURE.md). They do
+not establish model training, autonomous tool creation, or distributed agent
+collaboration.
+
 ## Current choices
 
 | Area | Current technology | Observed constraint |

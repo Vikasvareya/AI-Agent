@@ -3,6 +3,8 @@ from app.context.base_context_resolver import BaseContextResolver
 from app.executor.base_executor import BaseExecutor
 from app.memory.conversation_memory import ConversationMemory
 from app.models.plan import Plan
+from app.planner.execution_plan import ExecutionPlan
+from app.planner.execution_step import ExecutionStep
 from app.enums.action_type import ActionType
 from app.planner.base_planner import BasePlanner
 
@@ -68,3 +70,42 @@ def test_react_agent_chat_saves_conversation():
         {"role": "user", "content": "Hello"},
         {"role": "assistant", "content": "recovered"},
     ]
+
+
+def test_react_execution_plan_failure_is_not_automatically_replayed():
+    class FailingExecutor(BaseExecutor):
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, plan, context=None):
+            self.calls += 1
+            raise RuntimeError("execution plan failed")
+
+    class ExecutionPlanner(BasePlanner):
+        def plan(self, prompt):
+            return ExecutionPlan(
+                goal=prompt,
+                steps=[
+                    ExecutionStep(
+                        id="step",
+                        action=ActionType.TOOL,
+                    )
+                ],
+            )
+
+    executor = FailingExecutor()
+    agent = ReActAgent(
+        memory=ConversationMemory(),
+        planner=ExecutionPlanner(),
+        executor=executor,
+        context_resolver=Resolver(),
+        max_retries=3,
+    )
+
+    try:
+        agent.run("Do not retry")
+        assert False, "Expected ExecutionPlan failure"
+    except RuntimeError as exc:
+        assert "execution plan failed" in str(exc)
+
+    assert executor.calls == 1

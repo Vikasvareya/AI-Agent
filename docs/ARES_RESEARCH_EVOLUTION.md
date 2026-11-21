@@ -1,5 +1,10 @@
 # ARES: Research and Evolution
 
+ARES is a proposed evolution track within the broader
+[AI Brain Master Architecture](./AI_BRAIN_MASTER_ARCHITECTURE.md). It is not
+an implemented part of AI Brain and must remain an evidence-gated research
+initiative.
+
 ## Status and naming
 
 **ARES is proposed only.** The current repository does not contain an ARES

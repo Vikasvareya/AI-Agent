@@ -2,7 +2,7 @@ from collections import deque
 from threading import Lock
 from uuid import uuid4
 
-from app.realtime.models import WorkflowEvent
+from app.realtime.models import AgentActivityEvent, WorkflowEvent
 
 
 class EventBus:
@@ -84,6 +84,16 @@ class EventBus:
                     buffer.append(event)
 
         return event
+
+    def publish_activity(
+        self,
+        event: AgentActivityEvent,
+    ) -> WorkflowEvent:
+        return self.publish(
+            event.run_id,
+            event.event_type,
+            event.to_dict(),
+        )
 
     def consume(
         self,

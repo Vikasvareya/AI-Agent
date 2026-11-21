@@ -9,6 +9,12 @@ from app.api.http_server import (
 )
 from app.api.workflow_service import WorkflowAPIService
 from app.chat.store import ChatStore
+from app.agents.agent_registry import AgentRegistry
+from app.agents.coordinator import (
+    CoordinatorAgent,
+    DelegationPermissionPolicy,
+)
+from app.agents.shared_memory import SharedMemory
 from app.realtime.event_bus import EventBus
 from app.workflows.engine import WorkflowEngine
 from app.workflows.models import Workflow, WorkflowNode
@@ -67,6 +73,119 @@ def test_http_health_and_run_creation():
             run = json.loads(response.read())
             assert response.status == 201
             assert run["status"] == "completed"
+    finally:
+        server.stop()
+
+
+def test_http_async_agent_delegation_can_be_cancelled(tmp_path):
+    class EchoAgent:
+        def chat(self, prompt):
+            return f"echo:{prompt}"
+
+    bus = EventBus()
+    api = WorkflowAPIService(WorkflowEngine(event_bus=bus))
+    store = ChatStore(str(tmp_path / "async-delegation.sqlite3"))
+    registry = AgentRegistry()
+    registry.register("echo", EchoAgent())
+    coordinator = CoordinatorAgent(
+        registry,
+        SharedMemory(),
+        "echo",
+    )
+    server = WorkflowHTTPServer(
+        api,
+        bus,
+        host="127.0.0.1",
+        port=0,
+        chat_service=SimpleNamespace(store=store),
+        delegation_coordinator=coordinator,
+        delegation_policy=DelegationPermissionPolicy({
+            "admin": None,
+            "user": ("echo",),
+        }),
+    )
+    server.start()
+    port = server._server.server_address[1]
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/agents/delegate",
+            data=json.dumps({
+                "agents": ["echo"],
+                "prompt": "Async analyze",
+                "async": True,
+            }).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=2) as response:
+            result = json.loads(response.read())
+            assert response.status == 202
+            task_id = result["tasks"][0]["id"]
+        cancel = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/agent-tasks/{task_id}/cancel",
+            data=b"{}",
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(cancel, timeout=2) as response:
+            assert json.loads(response.read())["cancelled"] is True
+    finally:
+        server.stop()
+
+
+def test_http_durable_agent_delegation(tmp_path):
+    class EchoAgent:
+        def chat(self, prompt):
+            return f"echo:{prompt}"
+
+    bus = EventBus()
+    api = WorkflowAPIService(WorkflowEngine(event_bus=bus))
+    store = ChatStore(str(tmp_path / "delegation.sqlite3"))
+    registry = AgentRegistry()
+    registry.register("echo", EchoAgent())
+    coordinator = CoordinatorAgent(
+        registry,
+        SharedMemory(),
+        "echo",
+    )
+    server = WorkflowHTTPServer(
+        api,
+        bus,
+        host="127.0.0.1",
+        port=0,
+        chat_service=SimpleNamespace(store=store),
+        delegation_coordinator=coordinator,
+        delegation_policy=DelegationPermissionPolicy({
+            "admin": None,
+            "user": ("echo",),
+        }),
+    )
+    server.start()
+    port = server._server.server_address[1]
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/agents/delegate",
+            data=json.dumps({
+                "agents": ["echo"],
+                "prompt": "Analyze",
+            }).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=2) as response:
+            result = json.loads(response.read())
+            assert response.status == 202
+            task_id = result["tasks"][0]["id"]
+            assert result["aggregation"]["status"] == "completed"
+
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/v1/agent-tasks/{task_id}",
+            timeout=2,
+        ) as response:
+            task = json.loads(response.read())
+            assert task["status"] == "completed"
+            assert task["result"] == "echo:Analyze"
+            assert len(task["messages"]) == 2
     finally:
         server.stop()
 

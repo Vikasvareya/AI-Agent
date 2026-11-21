@@ -1,9 +1,15 @@
-# AI Agent Framework
+# AI Brain — Autonomous Cognitive Intelligence Platform
 
 An extensible Python agent framework with a chat API, workflow foundation,
 and administrator coding workspace. The repository is evolving; some
 components are prototypes or single-process implementations, and it is not
-currently a proven high-traffic or high-availability platform.
+currently a complete autonomous cognitive system or proven high-traffic,
+high-availability platform. AI Brain is the long-term product architecture for
+evolving this repository; it does not claim consciousness or present future
+capabilities as implemented.
+
+See the [AI Brain Master Architecture](./docs/AI_BRAIN_MASTER_ARCHITECTURE.md)
+and [Shared Agent Constitution](./docs/AGENT_CONSTITUTION.md).
 
 ## What exists today
 
@@ -88,9 +94,14 @@ and submit separate search terms; the chat prompt is not sent to Brave.
 
 ### Authoritative project guides
 
+- [AI Brain Master Architecture](./docs/AI_BRAIN_MASTER_ARCHITECTURE.md)
+- [Shared Agent Constitution](./docs/AGENT_CONSTITUTION.md)
 - [Project Vision](./docs/PROJECT_VISION.md)
 - [Current Implementation](./docs/CURRENT_IMPLEMENTATION.md)
 - [Architecture](./docs/architecture.md)
+- [Live Cognitive Activity](./docs/LIVE_COGNITIVE_ACTIVITY.md)
+- [Persistent User Memory](./docs/PERSISTENT_USER_MEMORY.md)
+- [Unified Web Research](./docs/UNIFIED_WEB_RESEARCH.md)
 - [Product Roadmap](./docs/PRODUCT_ROADMAP.md)
 - [ARES Research and Evolution](./docs/ARES_RESEARCH_EVOLUTION.md) — proposed
   only; no ARES capability is implemented

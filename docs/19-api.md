@@ -17,6 +17,9 @@ boundaries, see [API and Developer Guide](./API_AND_DEVELOPER_GUIDE.md) and
 
 ## Resources
 
+- Delegate a prompt to permitted agents
+- List and inspect owner-scoped delegated agent tasks
+- Inspect structured sender/recipient delegation messages
 - List registered workflows
 - Admin: create a workflow definition
 - User/admin: create a workflow run

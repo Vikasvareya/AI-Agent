@@ -22,4 +22,7 @@ for single-process restart recovery, not horizontal execution or high
 availability. Checkpoint callbacks remain available to other integrations.
 
 See [Current Implementation](./CURRENT_IMPLEMENTATION.md) and
-[Product Roadmap](./PRODUCT_ROADMAP.md).
+[Product Roadmap](./PRODUCT_ROADMAP.md). Workflow participation and approval
+are future foundations for the
+[AI Brain Master Architecture](./AI_BRAIN_MASTER_ARCHITECTURE.md); they do not
+constitute a Cognitive Core or distributed multi-agent runtime.

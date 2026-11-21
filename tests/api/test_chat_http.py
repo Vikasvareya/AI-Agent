@@ -11,12 +11,14 @@ from app.api.workflow_service import WorkflowAPIService
 from app.chat.service import ChatService
 from app.chat.store import ChatStore
 from app.realtime.event_bus import EventBus
+from app.runtime.unified_agent_runtime import UnifiedAgentRuntime
 from app.workflows.engine import WorkflowEngine
 
 
 class FakeProvider:
     def __init__(self):
         self.refresh_requests = []
+        self.calls = []
 
     @property
     def default_model(self):
@@ -34,6 +36,10 @@ class FakeProvider:
         ]
 
     def ask(self, messages, *, model=None, timeout=None):
+        self.calls.append({
+            "messages": messages,
+            "model": model,
+        })
         return f"Reply to: {messages[-1]['content']}"
 
 
@@ -67,16 +73,16 @@ def test_chat_frontend_serves_built_bundle():
         with urllib.request.urlopen(f"{base_url}/chat/", timeout=2) as response:
             html = response.read().decode()
             assert response.status == 200
-            assert "<title>AI Agent Workspace</title>" in html
+            assert "<title>AI Brain Workspace</title>" in html
         with urllib.request.urlopen(f"{base_url}/coding/", timeout=2) as response:
             assert response.status == 200
-            assert "<title>AI Agent Workspace</title>" in response.read().decode()
+            assert "<title>AI Brain Workspace</title>" in response.read().decode()
         with urllib.request.urlopen(
             f"{base_url}/coding/share/preview-token",
             timeout=2,
         ) as response:
             assert response.status == 200
-            assert "<title>AI Agent Workspace</title>" in response.read().decode()
+            assert "<title>AI Brain Workspace</title>" in response.read().decode()
 
         assets = re.findall(r'(?:src|href)="([^"]+\.(?:js|css))"', html)
         assert len(assets) == 2
@@ -119,6 +125,7 @@ def test_guest_chat_is_cookie_scoped_and_works_without_account(tmp_path):
             ChatStore(tmp_path / "chat.sqlite3"),
             provider,
             web_search_provider=FakeWebSearch(),
+            agent_runtime=UnifiedAgentRuntime(provider),
         ),
     )
     server.start()
@@ -186,6 +193,66 @@ def test_guest_chat_is_cookie_scoped_and_works_without_account(tmp_path):
         with urllib.request.urlopen(create, timeout=2) as response:
             conversation = json.loads(response.read())
 
+        date_send = _request(
+            f"{base_url}/v1/chat/conversations/{conversation['id']}/messages",
+            method="POST",
+            body={
+                "content": "What is the date today?",
+                "client_message_id": "guest-date-1",
+                "mode": "chat",
+            },
+            cookie=cookie,
+        )
+        with urllib.request.urlopen(date_send, timeout=2) as response:
+            date_result = json.loads(response.read())
+        assert "202" in date_result["assistant_message"]["content"]
+        assert provider.calls == []
+
+        germany_send = _request(
+            f"{base_url}/v1/chat/conversations/{conversation['id']}/messages",
+            method="POST",
+            body={
+                "content": "What time is it in Germany?",
+                "client_message_id": "guest-germany-1",
+                "mode": "chat",
+            },
+            cookie=cookie,
+        )
+        with urllib.request.urlopen(germany_send, timeout=2) as response:
+            germany_result = json.loads(response.read())
+        assert "Germany" in germany_result["assistant_message"]["content"]
+        assert provider.calls == []
+
+        india_follow_up = _request(
+            f"{base_url}/v1/chat/conversations/{conversation['id']}/messages",
+            method="POST",
+            body={
+                "content": "and India",
+                "client_message_id": "guest-india-follow-up-1",
+                "mode": "chat",
+            },
+            cookie=cookie,
+        )
+        with urllib.request.urlopen(india_follow_up, timeout=2) as response:
+            india_result = json.loads(response.read())
+        assert "India" in india_result["assistant_message"]["content"]
+        assert provider.calls == []
+
+        use_tool = _request(
+            f"{base_url}/v1/chat/conversations/{conversation['id']}/messages",
+            method="POST",
+            body={
+                "content": "use tool",
+                "client_message_id": "guest-use-tool-1",
+                "mode": "chat",
+            },
+            cookie=cookie,
+        )
+        with urllib.request.urlopen(use_tool, timeout=2) as response:
+            tool_result = json.loads(response.read())
+        assert "India" in tool_result["assistant_message"]["content"]
+        assert provider.calls == []
+
         send = _request(
             f"{base_url}/v1/chat/conversations/{conversation['id']}/messages",
             method="POST",
@@ -242,8 +309,103 @@ def test_guest_chat_is_cookie_scoped_and_works_without_account(tmp_path):
         server.stop()
 
 
+def test_memory_api_is_owner_scoped(tmp_path):
+    bus = EventBus()
+    provider = FakeProvider()
+    store = ChatStore(tmp_path / "memory-api.sqlite3")
+    server = WorkflowHTTPServer(
+        WorkflowAPIService(WorkflowEngine(event_bus=bus)),
+        bus,
+        host="127.0.0.1",
+        port=0,
+        role_tokens={
+            "owner-a-token": ("user", "owner-a"),
+            "owner-b-token": ("user", "owner-b"),
+        },
+        require_auth=True,
+        chat_service=ChatService(
+            store,
+            provider,
+            agent_runtime=UnifiedAgentRuntime(provider),
+        ),
+    )
+    server.start()
+    base_url = f"http://127.0.0.1:{server._server.server_address[1]}"
+    try:
+        create = _request(
+            f"{base_url}/v1/memory/records",
+            method="POST",
+            body={
+                "category": "professional",
+                "key": "profession",
+                "value": "Software Engineer",
+            },
+            token="owner-a-token",
+        )
+        with urllib.request.urlopen(create, timeout=2) as response:
+            created = json.loads(response.read())["record"]
+
+        profile = _request(
+            f"{base_url}/v1/memory/profile",
+            token="owner-a-token",
+        )
+        with urllib.request.urlopen(profile, timeout=2) as response:
+            listed = json.loads(response.read())
+        assert listed["records"][0]["value"] == "Software Engineer"
+
+        cross_owner = _request(
+            f"{base_url}/v1/memory/records/{created['id']}",
+            token="owner-b-token",
+        )
+        try:
+            urllib.request.urlopen(cross_owner, timeout=2)
+            assert False, "Cross-owner memory access must fail."
+        except urllib.error.HTTPError as error:
+            assert error.code == 404
+
+        resume_create = _request(
+            f"{base_url}/v1/resume/drafts",
+            method="POST",
+            body={
+                "title": "Professional Resume",
+                "content": "Software Engineer",
+                "status": "draft",
+            },
+            token="owner-a-token",
+        )
+        with urllib.request.urlopen(resume_create, timeout=2) as response:
+            resume = json.loads(response.read())["draft"]
+        resume_edit = _request(
+            f"{base_url}/v1/resume/drafts/{resume['id']}",
+            method="PATCH",
+            body={"content": "Senior Software Engineer", "status": "edited"},
+            token="owner-a-token",
+        )
+        with urllib.request.urlopen(resume_edit, timeout=2) as response:
+            assert json.loads(response.read())["draft"]["content"] == "Senior Software Engineer"
+        resume_export = _request(
+            f"{base_url}/v1/resume/drafts/{resume['id']}/export",
+            token="owner-a-token",
+        )
+        with urllib.request.urlopen(resume_export, timeout=2) as response:
+            exported = json.loads(response.read())
+        assert exported["format"] == "text"
+        assert "Senior Software Engineer" in exported["content"]
+
+        delete = _request(
+            f"{base_url}/v1/memory/records/{created['id']}",
+            method="DELETE",
+            token="owner-a-token",
+        )
+        with urllib.request.urlopen(delete, timeout=2) as response:
+            assert json.loads(response.read())["deleted"] is True
+    finally:
+        server.stop()
+
+
 def test_chat_account_identity_is_tenant_scoped_across_token_rotation(tmp_path):
     bus = EventBus()
+    account_provider = FakeProvider()
     server = WorkflowHTTPServer(
         WorkflowAPIService(WorkflowEngine(event_bus=bus)),
         bus,
@@ -257,7 +419,8 @@ def test_chat_account_identity_is_tenant_scoped_across_token_rotation(tmp_path):
         require_auth=True,
         chat_service=ChatService(
             ChatStore(tmp_path / "chat.sqlite3"),
-            FakeProvider(),
+            account_provider,
+            agent_runtime=UnifiedAgentRuntime(account_provider),
         ),
     )
     server.start()

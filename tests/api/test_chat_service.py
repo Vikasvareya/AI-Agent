@@ -6,6 +6,8 @@ import pytest
 from app.chat.service import ChatError, ChatService
 from app.chat.store import ChatStore
 from app.chat.web_search import BraveWebSearch, WebSearchError
+from app.realtime.event_bus import EventBus
+from app.runtime.unified_agent_runtime import UnifiedAgentRuntime
 
 
 class FakeProvider:
@@ -41,6 +43,7 @@ def _service(tmp_path):
     service = ChatService(
         ChatStore(tmp_path / "chat.sqlite3"),
         provider,
+        agent_runtime=UnifiedAgentRuntime(provider),
     )
     return service, provider
 
@@ -336,6 +339,8 @@ def test_chat_provider_failure_is_reported_and_retryable(tmp_path):
             "message-1",
         )
     assert error.value.code == "MODEL_UNAVAILABLE"
+    assert "conversation and saved profile remain available" in error.value.message
+    assert "Reference:" in error.value.message
 
     provider.ask = lambda _messages, *, model=None: "Recovered."
     retried = service.send_message(
@@ -449,6 +454,36 @@ def test_chat_capabilities_report_media_provider_requirements(tmp_path):
     service.close()
 
 
+def test_freshness_sensitive_query_detected_without_checkbox(tmp_path):
+    service, provider = _service(tmp_path)
+    conversation = service.create_conversation("owner-a")
+
+    result = service.send_message(
+        "owner-a",
+        conversation["id"],
+        "What is the current Laravel version?",
+        "freshness-message",
+    )
+
+    assert "cannot reliably verify" in result["assistant_message"]["content"].lower()
+    assert provider.prompts == []
+
+
+def test_static_question_does_not_trigger_automatic_research(tmp_path):
+    service, provider = _service(tmp_path)
+    conversation = service.create_conversation("owner-a")
+
+    result = service.send_message(
+        "owner-a",
+        conversation["id"],
+        "Explain dependency injection.",
+        "static-message",
+    )
+
+    assert result["assistant_message"]["content"] == "Hello from the assistant."
+    assert len(provider.prompts) == 1
+
+
 def test_chat_web_search_is_opt_in_and_returns_cited_sources(tmp_path):
     class FakeSearch:
         available = True
@@ -544,3 +579,302 @@ def test_brave_search_returns_sources_and_blocks_common_secrets(monkeypatch):
     with pytest.raises(WebSearchError, match="credentials and source code"):
         search.search("api_key=private-value")
     assert len(calls) == 1
+
+
+def test_unknown_person_query_never_generates_unverified_profile(tmp_path):
+    service, provider = _service(tmp_path)
+    conversation = service.create_conversation("owner-a")
+
+    result = service.send_message(
+        "owner-a",
+        conversation["id"],
+        "Who is Vikas?",
+        "unknown-person-1",
+    )
+
+    assert "don't have enough verified information" in result["assistant_message"]["content"]
+    assert "New Delhi" not in result["assistant_message"]["content"]
+    assert provider.prompts == []
+
+
+def test_confirmed_profile_supports_resume_across_conversations(tmp_path):
+    service, provider = _service(tmp_path)
+    first = service.create_conversation("owner-a")
+    service.send_message(
+        "owner-a",
+        first["id"],
+        "I work as a software engineer.",
+        "casual-profession",
+    )
+    confirmed = service.send_message(
+        "owner-a",
+        first["id"],
+        "Yes, remember it.",
+        "confirm-profession",
+    )
+    assert "Confirmed and saved" in confirmed["assistant_message"]["content"]
+
+    second = service.create_conversation("owner-a")
+    resume = service.send_message(
+        "owner-a",
+        second["id"],
+        "Create an ATS-friendly resume with it.",
+        "resume-request",
+    )
+
+    assert "ATS-friendly resume draft" in resume["assistant_message"]["content"]
+    assert "software engineer" in resume["assistant_message"]["content"].lower()
+    assert "[Name not provided]" in resume["assistant_message"]["content"]
+    assert "[Employment history not provided]" in resume["assistant_message"]["content"]
+    assert provider.prompts == []
+
+
+def test_resume_without_confirmed_profile_is_honest(tmp_path):
+    service, provider = _service(tmp_path)
+    conversation = service.create_conversation("owner-a")
+
+    result = service.send_message(
+        "owner-a",
+        conversation["id"],
+        "Create a resume.",
+        "resume-empty",
+    )
+
+    assert "don't have any confirmed profile information" in result["assistant_message"]["content"]
+    assert provider.prompts == []
+
+
+def test_explicit_memory_is_saved_and_retrieved_across_conversations(tmp_path):
+    service, provider = _service(tmp_path)
+    first = service.create_conversation("owner-a")
+    saved = service.send_message(
+        "owner-a",
+        first["id"],
+        "Remember that I am a software engineer.",
+        "memory-explicit-1",
+    )
+
+    assert "saved to your profile" in saved["assistant_message"]["content"].lower()
+    assert saved["memory_record"]["category"] == "professional"
+    assert saved["memory_record"]["value"] == "software engineer"
+
+    second = service.create_conversation("owner-a")
+    result = service.send_message(
+        "owner-a",
+        second["id"],
+        "What is my profession?",
+        "memory-retrieve-1",
+    )
+    assert len(service.memory_service.retrieve_relevant(
+        "owner-a",
+        "What is my profession?",
+    )) == 1
+    assert result["assistant_message"]["content"]
+    assert service.store.list_memory_records("owner-b") == []
+
+
+def test_casual_memory_requires_confirmation_and_sensitive_memory_is_rejected(tmp_path):
+    service, _ = _service(tmp_path)
+    conversation = service.create_conversation("owner-a")
+
+    proposed = service.send_message(
+        "owner-a",
+        conversation["id"],
+        "I work as a software engineer.",
+        "memory-casual-1",
+    )
+    assert "Would you like me to remember" in proposed["assistant_message"]["content"]
+    assert proposed["memory_record"]["status"] == "pending_confirmation"
+
+    sensitive = service.send_message(
+        "owner-a",
+        conversation["id"],
+        "Remember that my password is hunter2.",
+        "memory-sensitive-1",
+    )
+    assert "cannot store" in sensitive["assistant_message"]["content"].lower()
+    assert all(
+        "password" not in record["value"].lower()
+        for record in service.store.list_memory_records("owner-a")
+    )
+
+
+def test_profile_correction_requires_confirmation_and_records_history(tmp_path):
+    service, _ = _service(tmp_path)
+    conversation = service.create_conversation("owner-a")
+    record = service.store.save_memory_record(
+        "owner-a",
+        conversation_id=conversation["id"],
+        category="identity",
+        key="location",
+        value="New Delhi",
+        source="explicit_user_statement",
+        confidence=1.0,
+        status="confirmed",
+    )
+
+    proposed = service.send_message(
+        "owner-a",
+        conversation["id"],
+        "I live in Jaipur.",
+        "correction-propose",
+    )
+    assert "profile correction" in proposed["assistant_message"]["content"].lower()
+    assert proposed["memory_correction"]["proposed_value"] == "Jaipur"
+
+    confirmed = service.send_message(
+        "owner-a",
+        conversation["id"],
+        "Yes, remember it.",
+        "correction-confirm",
+    )
+    assert "confirmed and saved" in confirmed["assistant_message"]["content"].lower()
+    updated = service.store.get_memory_record("owner-a", record["id"])
+    assert updated["value"] == "Jaipur"
+    history = service.store.list_memory_history("owner-a", record["id"])
+    assert history[0]["previous_value"] == "New Delhi"
+    assert history[0]["new_value"] == "Jaipur"
+
+
+def test_resume_draft_can_be_edited_exported_and_deleted(tmp_path):
+    service, _ = _service(tmp_path)
+    draft = service.store.save_resume_draft(
+        "owner-a",
+        title="Professional Resume",
+        content="Software Engineer",
+    )
+
+    edited = service.store.save_resume_draft(
+        "owner-a",
+        draft_id=draft["id"],
+        title=draft["title"],
+        content="Senior Software Engineer",
+        status="edited",
+    )
+    assert edited["content"] == "Senior Software Engineer"
+    assert edited["status"] == "edited"
+    assert service.store.get_resume_draft("owner-b", draft["id"]) is None
+    export = service.store.get_resume_draft("owner-a", draft["id"])
+    assert export["content"] == "Senior Software Engineer"
+    assert service.store.delete_resume_draft("owner-a", draft["id"]) is True
+
+
+def test_memory_update_delete_and_clear_are_owner_scoped(tmp_path):
+    service, _ = _service(tmp_path)
+    record = service.store.save_memory_record(
+        "owner-a",
+        conversation_id=None,
+        category="skills",
+        key="skills",
+        value="Laravel",
+        source="explicit_user_statement",
+        confidence=1.0,
+        status="confirmed",
+    )
+
+    updated = service.store.update_memory_record(
+        "owner-a",
+        record["id"],
+        value="Laravel and Python",
+        status="confirmed",
+    )
+    assert updated["value"] == "Laravel and Python"
+    assert service.store.get_memory_record("owner-b", record["id"]) is None
+    assert service.store.delete_memory_record("owner-b", record["id"]) is False
+    assert service.store.delete_memory_record("owner-a", record["id"]) is True
+    assert service.store.clear_memory_records("owner-b") == 0
+
+
+def test_browser_chat_route_style_executes_time_tool_without_provider_call(tmp_path):
+    service, provider = _service(tmp_path)
+    conversation = service.create_conversation("owner-a")
+
+    result = service.send_message(
+        "owner-a",
+        conversation["id"],
+        "What is the date today?",
+        "date-message",
+        mode="chat",
+    )
+
+    assert "202" in result["assistant_message"]["content"]
+    assert provider.prompts == []
+
+
+def test_browser_chat_route_style_executes_math_tool_without_provider_call(tmp_path):
+    service, provider = _service(tmp_path)
+    conversation = service.create_conversation("owner-a")
+
+    result = service.send_message(
+        "owner-a",
+        conversation["id"],
+        "25 * 4",
+        "math-message",
+        mode="chat",
+    )
+
+    assert result["assistant_message"]["content"] == "100"
+    assert provider.prompts == []
+
+
+def test_chat_activity_events_are_persisted_ordered_and_owner_scoped(tmp_path):
+    provider = FakeProvider()
+    bus = EventBus()
+    store = ChatStore(tmp_path / "activity.sqlite3")
+    service = ChatService(store, provider, event_bus=bus)
+    conversation = service.create_conversation("owner-a")
+
+    result = service.send_message(
+        "owner-a",
+        conversation["id"],
+        "Hello",
+        "activity-message",
+        run_id="chat-run-1",
+    )
+
+    events = store.list_activity_events(
+        "owner-a",
+        conversation["id"],
+        run_id="chat-run-1",
+    )
+    assert result["run_id"] == "chat-run-1"
+    assert [event["sequence_number"] for event in events] == list(
+        range(1, len(events) + 1)
+    )
+    assert events[0]["event_type"] == "request.received"
+    assert events[-1]["event_type"] == "execution.completed"
+    assert store.list_activity_events(
+        "owner-b",
+        conversation["id"],
+        run_id="chat-run-1",
+    ) == []
+
+
+def test_chat_activity_event_deduplicates_duplicate_event_id(tmp_path):
+    store = ChatStore(tmp_path / "dedupe.sqlite3")
+    conversation = store.create_conversation("owner-a")
+    event = {
+        "event_id": "duplicate-event",
+        "run_id": "run-1",
+        "conversation_id": conversation["id"],
+        "task_id": None,
+        "agent_id": "chat_agent",
+        "parent_task_id": None,
+        "event_type": "request.received",
+        "status": "completed",
+        "summary": "Received your request.",
+        "timestamp": "2026-11-21T00:00:00+00:00",
+        "visibility": "user",
+        "metadata": {},
+    }
+
+    first = store.record_activity_event("owner-a", event)
+    second = store.record_activity_event("owner-a", event)
+
+    assert first["sequence_number"] == 1
+    assert second["sequence_number"] == 1
+    assert len(store.list_activity_events(
+        "owner-a",
+        conversation["id"],
+        run_id="run-1",
+    )) == 1

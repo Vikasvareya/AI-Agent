@@ -139,27 +139,15 @@ class ReActAgent:
                     observation="",
                 )
             )
-
-        for attempt in range(self.max_retries + 1):
-            try:
-                observation = self.executor.execute(
-                    plan,
-                    context,
-                )
-                if trace.steps:
-                    trace.steps[-1].observation = observation
-                return observation
-            except Exception as exc:
-                if trace.steps:
-                    trace.steps[-1].observation = str(exc)
-                if attempt >= self.max_retries:
-                    raise
-                trace.steps.append(
-                    ReActStep(
-                        thought="An execution step failed; retry the plan.",
-                        action="retry",
-                        observation=str(exc),
-                    )
-                )
-
-        raise RuntimeError("ReAct loop ended without a result.")
+        try:
+            observation = self.executor.execute(
+                plan,
+                context,
+            )
+            if trace.steps:
+                trace.steps[-1].observation = observation
+            return observation
+        except Exception as exc:
+            if trace.steps:
+                trace.steps[-1].observation = str(exc)
+            raise

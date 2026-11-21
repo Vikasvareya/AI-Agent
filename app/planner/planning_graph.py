@@ -12,25 +12,38 @@ class PlanningGraph:
         plan: ExecutionPlan,
     ):
         self.plan = plan
-        self._steps = {
-            step.id: step
-            for step in plan.steps
-        }
+        self._steps: dict[str, ExecutionStep] = {}
 
     def validate(self) -> None:
-        step_ids = set(
-            self._steps
-        )
+        seen: set[str] = set()
+        steps: dict[str, ExecutionStep] = {}
+        for step in self.plan.steps:
+            if not isinstance(step.id, str) or not step.id.strip():
+                raise ValueError(
+                    "Every execution step must have a valid non-empty step ID."
+                )
+            if step.id in seen:
+                raise ValueError(
+                    f"Duplicate step ID '{step.id}' is not allowed."
+                )
+            seen.add(step.id)
+            steps[step.id] = step
 
-        for step in self._steps.values():
+        self._steps = steps
+        for step in self.plan.steps:
+            if step.id in step.dependencies:
+                raise ValueError(
+                    f"Step '{step.id}' cannot depend on itself."
+                )
             unknown_dependencies = [
                 dependency_id
                 for dependency_id in step.dependencies
-                if dependency_id not in step_ids
+                if dependency_id not in seen
             ]
             if unknown_dependencies:
                 raise ValueError(
-                    f"Step '{step.id}' has unknown dependencies: "
+                    f"Step '{step.id}' depends on unknown step '{unknown_dependencies[0]}'. "
+                    f"unknown dependencies: "
                     f"{', '.join(unknown_dependencies)}"
                 )
 
@@ -90,6 +103,8 @@ class PlanningGraph:
         self,
         step_id: str,
     ) -> list[ExecutionStep]:
+        if not self._steps:
+            self.validate()
         if step_id not in self._steps:
             raise KeyError(
                 f"Unknown step: '{step_id}'."
@@ -104,6 +119,8 @@ class PlanningGraph:
         self,
         step_id: str,
     ) -> list[ExecutionStep]:
+        if not self._steps:
+            self.validate()
         if step_id not in self._steps:
             raise KeyError(
                 f"Unknown step: '{step_id}'."

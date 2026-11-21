@@ -2,11 +2,14 @@
 
 ## Purpose
 
-AI-Agent is an extensible Python agent framework and an evolving product
-workspace for experimenting with planning, tools, memory, workflows, chat, and
-coding assistance. The long-term goal is a dependable platform that can be
+AI Brain is the product identity for this extensible Python agent framework
+and evolving workspace for planning, tools, memory, workflows, chat, and coding
+assistance. The long-term goal is a dependable cognitive platform that can be
 extended by developers and operated responsibly—not a claim that the current
 repository is already production-scale.
+
+The canonical architecture is
+[AI_BRAIN_MASTER_ARCHITECTURE.md](./AI_BRAIN_MASTER_ARCHITECTURE.md).
 
 ## Intended users
 

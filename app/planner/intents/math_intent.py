@@ -25,13 +25,13 @@ class MathIntent(BaseIntent):
         matched = False
 
         if re.fullmatch(
-            r"[0-9+\-*/(). ]+",
+            r"[0-9+\-*/().=<>\s]+",
             prompt,
         ):
             matched = True
 
         elif re.search(
-            r"\d+\s*[\+\-\*/]\s*\d+",
+            r"\d+\s*(?:[\+\-\*/]|==?|!=|>=|<=|>|<)\s*\d+",
             prompt,
         ):
             matched = True
@@ -51,7 +51,7 @@ class MathIntent(BaseIntent):
         """
 
         match = re.search(
-            r"\d+\s*[\+\-\*/]\s*\d+",
+            r"\d+(?:\s*[\+\-\*/]\s*\d+|\s*(?:==?|!=|>=|<=|>|<)\s*\d+(?:\s*[\+\-\*/]\s*\d+)*)",
             prompt,
         )
 

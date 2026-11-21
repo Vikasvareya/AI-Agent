@@ -4,6 +4,7 @@ from app.context.base_context_resolver import BaseContextResolver
 from app.executor.base_executor import BaseExecutor
 from app.memory.base_memory import BaseMemory
 from app.planner.base_planner import BasePlanner
+from app.planner.execution_plan import ExecutionPlan
 
 
 @dataclass
@@ -54,6 +55,21 @@ class ReflectiveAgent:
         resolved_prompt = self.context_resolver.resolve(prompt)
         plan = self.planner.plan(resolved_prompt)
         trace = ReflectionTrace(goal=resolved_prompt)
+
+        if isinstance(plan, ExecutionPlan):
+            try:
+                result = self.executor.execute(plan)
+            except Exception as exc:
+                result = str(exc)
+            corrected = self._is_usable(result)
+            trace.reflections.append(
+                Reflection(
+                    attempt=1,
+                    observation=result,
+                    corrected=corrected,
+                )
+            )
+            return result, trace
 
         for attempt in range(self.max_corrections + 1):
             try:

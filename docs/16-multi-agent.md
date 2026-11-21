@@ -8,10 +8,23 @@ prototype:
   found in the prompt, or the configured default.
 - `SharedMemory` stores values and request/reply history in process memory.
 
-The coordinator calls one target and returns its result. It does not fan out
-to multiple agents, aggregate parallel results, persist shared state, or
-provide durable handoffs. This is not a distributed multi-agent orchestration
-service.
+The coordinator can route to one agent or fan out to a bounded set of
+registered agents. Each delegation creates owner-scoped task records and
+structured sender/recipient messages in `ChatStore`, and the response includes
+a completed/partial/failed aggregation. User and admin permissions are checked
+through an explicit policy before execution.
+
+Execution can now be requested as durable work with `{"async": true}`. Tasks
+use a persisted queue, in-process workers, bounded leases, stale-leases
+recovery, bounded retries, and owner-scoped cancellation. Synchronous
+delegation remains available for compatibility. Cross-replica worker ownership
+is database-backed, but production horizontal scaling still requires replica
+coordination and operational testing.
+
+Agent roles and communication principles are governed by the
+[Shared Agent Constitution](./AGENT_CONSTITUTION.md). Future structured
+delegation, parallel execution, review, and result aggregation are roadmap
+capabilities, not current behavior.
 
 See [Product Roadmap](./PRODUCT_ROADMAP.md) for proposed durable execution
 and governance work.

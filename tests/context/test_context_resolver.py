@@ -50,3 +50,45 @@ def test_no_entity_prompt():
 
     assert result == "Hello"
     assert resolver.context.last_entity is None
+
+
+def test_time_context_follow_up_changes_location():
+    resolver = ContextResolver()
+    resolver.resolve("What time is it in Germany?")
+
+    result = resolver.resolve("and India")
+
+    assert result == "What time is it in India?"
+    assert resolver.context.last_action == "current_time"
+    assert resolver.context.last_location == "India"
+    assert resolver.context.last_tool == "time"
+
+
+def test_explicit_tool_uses_recent_time_context():
+    resolver = ContextResolver()
+    resolver.resolve("What time is it in Germany?")
+
+    result = resolver.resolve("use tool")
+
+    assert result == "What time is it in Germany?"
+    assert resolver.context.last_action == "current_time"
+    assert resolver.context.last_location == "Germany"
+
+
+def test_use_tool_without_context_asks_for_task():
+    resolver = ContextResolver()
+
+    result = resolver.resolve("use tool")
+
+    assert "specify" in result.lower()
+
+
+def test_unrelated_question_clears_time_context():
+    resolver = ContextResolver()
+    resolver.resolve("What time is it in Germany?")
+
+    result = resolver.resolve("What is the weather?")
+
+    assert result == "What is the weather?"
+    assert resolver.context.last_action is None
+    assert resolver.context.last_location is None

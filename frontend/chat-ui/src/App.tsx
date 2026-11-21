@@ -58,6 +58,44 @@ type Message = {
   content: string;
   created_at: string;
 };
+type MemoryRecord = {
+  id: string;
+  category: string;
+  key: string;
+  value: string;
+  source: string;
+  confidence: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  expires_at?: string | null;
+  metadata: Record<string, unknown>;
+};
+type MemoryHistory = {
+  id: string;
+  record_id: string;
+  category: string;
+  key: string;
+  previous_value?: string | null;
+  new_value: string;
+  source: string;
+  created_at: string;
+};
+type ActivityEvent = {
+  event_id: string;
+  run_id: string;
+  conversation_id: string;
+  task_id?: string | null;
+  agent_id?: string | null;
+  parent_task_id?: string | null;
+  event_type: string;
+  status: "pending" | "running" | "completed" | "failed" | "skipped" | "cancelled";
+  summary: string;
+  timestamp: string;
+  sequence_number: number;
+  visibility: string;
+  metadata: Record<string, unknown>;
+};
 
 class ApiError extends Error {
   readonly status: number;
@@ -146,6 +184,17 @@ function ChatApp() {
   const [error, setError] = useState("");
   const [accountOpen, setAccountOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [activities, setActivities] = useState<ActivityEvent[]>([]);
+  const [memoryRecords, setMemoryRecords] = useState<MemoryRecord[]>([]);
+  const [memoryLoading, setMemoryLoading] = useState(false);
+  const [memoryError, setMemoryError] = useState("");
+  const [memoryDraft, setMemoryDraft] = useState({
+    category: "user_notes",
+    key: "note",
+    value: "",
+  });
+  const [memoryHistory, setMemoryHistory] = useState<MemoryHistory[]>([]);
+  const activityControllerRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
@@ -155,6 +204,12 @@ function ChatApp() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, sending]);
+
+  useEffect(() => {
+    if (accountOpen && session !== "guest") {
+      void refreshMemory();
+    }
+  }, [accountOpen, session]);
 
   async function initialize() {
     const savedToken = sessionStorage.getItem("agent-token") || "";
@@ -232,6 +287,67 @@ function ChatApp() {
       );
     } catch (reason) {
       setError(errorMessage(reason));
+    }
+  }
+
+  function mergeActivities(events: ActivityEvent[]) {
+    setActivities(current => {
+      const merged = new Map(current.map(event => [event.event_id, event]));
+      events.forEach(event => merged.set(event.event_id, event));
+      return [...merged.values()].sort(
+        (left, right) => left.sequence_number - right.sequence_number,
+      );
+    });
+  }
+
+  async function startActivityStream(
+    conversationId: string,
+    runId: string,
+    authToken = token,
+  ) {
+    activityControllerRef.current?.abort();
+    const controller = new AbortController();
+    activityControllerRef.current = controller;
+
+    try {
+      const headers = new Headers();
+      if (authToken) headers.set("Authorization", `Bearer ${authToken}`);
+      const response = await fetch(
+        `/v1/chat/conversations/${encodeURIComponent(conversationId)}/activity/events?run_id=${encodeURIComponent(runId)}`,
+        { headers, credentials: "same-origin", signal: controller.signal },
+      );
+      if (!response.ok || !response.body) return;
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const blocks = buffer.split(/\r?\n\r?\n/);
+        buffer = blocks.pop() || "";
+        for (const block of blocks) {
+          const eventName = (block.match(/^event:\s*(.+)$/m) || [])[1];
+          const data = (block.match(/^data:\s*(.+)$/m) || [])[1];
+          if (!data) continue;
+          try {
+            const parsed = JSON.parse(data);
+            if (eventName === "activity.snapshot") {
+              mergeActivities(parsed.events || []);
+            } else {
+              const activity = parsed.payload as ActivityEvent | undefined;
+              if (activity?.event_id) mergeActivities([activity]);
+            }
+          } catch {
+            // Ignore incomplete or invalid SSE records; history remains available.
+          }
+        }
+      }
+    } catch (reason) {
+      if (!(reason instanceof DOMException && reason.name === "AbortError")) {
+        // Reconnection and history loading are handled by the next conversation refresh.
+      }
     }
   }
 
@@ -345,6 +461,12 @@ function ChatApp() {
       );
       setSelectedId(conversation.id);
       setMessages(conversation.messages);
+      const activity = await request<{ events: ActivityEvent[] }>(
+        `/v1/chat/conversations/${encodeURIComponent(id)}/activity`,
+        {},
+        authToken,
+      );
+      setActivities(activity.events);
       setSidebarOpen(false);
     } catch (reason) {
       setError(errorMessage(reason));
@@ -388,6 +510,8 @@ function ChatApp() {
     setSending(true);
     setInput("");
     const clientMessageId = crypto.randomUUID();
+    const runId = crypto.randomUUID();
+    setActivities([]);
     const optimisticMessage: Message = {
       id: clientMessageId,
       role: "user",
@@ -411,9 +535,11 @@ function ChatApp() {
         setSelectedId(conversationId);
         setConversations(current => [conversation, ...current]);
       }
+      void startActivityStream(conversationId, runId);
       const result = await request<{
         user_message: Message;
         assistant_message: Message;
+        run_id?: string;
       }>(
         `/v1/chat/conversations/${encodeURIComponent(conversationId)}/messages`,
         {
@@ -425,6 +551,7 @@ function ChatApp() {
             mode,
             web_search: webSearchEnabled,
             search_query: webSearchEnabled ? webSearchQuery.trim() : undefined,
+            run_id: runId,
           }),
         },
         token,
@@ -447,6 +574,124 @@ function ChatApp() {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       void sendMessage();
+    }
+  }
+
+  async function refreshMemory() {
+    if (!token || session === "guest") {
+      setMemoryRecords([]);
+      return;
+    }
+    setMemoryLoading(true);
+    setMemoryError("");
+    try {
+      const result = await request<{ records: MemoryRecord[] }>(
+        "/v1/memory/profile",
+        {},
+        token,
+      );
+      setMemoryRecords(result.records);
+      const history = await request<{ history: MemoryHistory[] }>(
+        "/v1/memory/history",
+        {},
+        token,
+      );
+      setMemoryHistory(history.history);
+    } catch (reason) {
+      setMemoryError(errorMessage(reason));
+    } finally {
+      setMemoryLoading(false);
+    }
+  }
+
+  async function addMemory(event: FormEvent) {
+    event.preventDefault();
+    if (!memoryDraft.value.trim()) return;
+    setMemoryLoading(true);
+    setMemoryError("");
+    try {
+      await request(
+        "/v1/memory/records",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            category: memoryDraft.category,
+            key: memoryDraft.key,
+            value: memoryDraft.value.trim(),
+          }),
+        },
+        token,
+      );
+      setMemoryDraft(current => ({ ...current, value: "" }));
+      await refreshMemory();
+    } catch (reason) {
+      setMemoryError(errorMessage(reason));
+    } finally {
+      setMemoryLoading(false);
+    }
+  }
+
+  async function editMemory(record: MemoryRecord) {
+    const corrected = window.prompt(
+      `Correct ${record.category}/${record.key}`,
+      record.value,
+    );
+    if (!corrected || corrected.trim() === record.value) return;
+    setMemoryLoading(true);
+    setMemoryError("");
+    try {
+      await request(
+        `/v1/memory/records/${encodeURIComponent(record.id)}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            value: corrected.trim(),
+            status: "confirmed",
+          }),
+        },
+        token,
+      );
+      await refreshMemory();
+    } catch (reason) {
+      setMemoryError(errorMessage(reason));
+    } finally {
+      setMemoryLoading(false);
+    }
+  }
+
+  async function deleteMemory(recordId: string) {
+    if (!window.confirm("Delete this memory?")) return;
+    setMemoryLoading(true);
+    setMemoryError("");
+    try {
+      await request(
+        `/v1/memory/records/${encodeURIComponent(recordId)}`,
+        { method: "DELETE" },
+        token,
+      );
+      await refreshMemory();
+    } catch (reason) {
+      setMemoryError(errorMessage(reason));
+    } finally {
+      setMemoryLoading(false);
+    }
+  }
+
+  async function clearMemory() {
+    if (!window.confirm("Clear the entire personal profile?")) return;
+    setMemoryLoading(true);
+    setMemoryError("");
+    try {
+      await request(
+        "/v1/memory/profile/clear",
+        { method: "POST", body: "{}" },
+        token,
+      );
+      await refreshMemory();
+    } catch (reason) {
+      setMemoryError(errorMessage(reason));
+    } finally {
+      setMemoryLoading(false);
     }
   }
 
@@ -543,7 +788,7 @@ function ChatApp() {
         <div className="brand">
           <div className="brand-mark"><Sparkles size={17} aria-hidden="true" /></div>
           <div>
-            <strong>Agent</strong>
+            <strong>AI Brain Agent</strong>
             <span>Workspace</span>
           </div>
           <a className="control-link" href="/" title="Open workflow control plane">
@@ -600,7 +845,7 @@ function ChatApp() {
             <Menu size={18} aria-hidden="true" />
           </button>
           <div className="model-label">
-            <span className="status-dot" /> AI Agent <ChevronDown className="chevron-icon" size={14} aria-hidden="true" />
+            <span className="status-dot" /> AI Brain <ChevronDown className="chevron-icon" size={14} aria-hidden="true" />
           </div>
           <div className="top-actions">
             <a
@@ -663,7 +908,7 @@ function ChatApp() {
                   </div>
                   <div className="message-content">
                     <div className="message-author">
-                      {message.role === "assistant" ? "AI Agent" : "You"}
+                      {message.role === "assistant" ? "AI Brain" : "You"}
                     </div>
                     <div className="message-text">{renderMessageContent(message.content)}</div>
                   </div>
@@ -673,8 +918,28 @@ function ChatApp() {
                 <article className="message assistant">
                   <div className="message-avatar assistant"><Sparkles size={14} aria-hidden="true" /></div>
                   <div className="message-content">
-                    <div className="message-author">AI Agent</div>
-                    <div className="thinking"><i /><i /><i /></div>
+                    <div className="message-author">AI Brain</div>
+                    {activities.length > 0 ? (
+                      <div className="activity-timeline" aria-label="AI Brain activity">
+                        {activities.map(activity => (
+                          <div
+                            className={`activity-item ${activity.status}`}
+                            key={activity.event_id}
+                            title={new Date(activity.timestamp).toLocaleTimeString()}
+                          >
+                            <span className="activity-status" aria-label={activity.status}>
+                              {activity.status === "completed" ? "✓"
+                                : activity.status === "failed" ? "!"
+                                : activity.status === "running" ? "●"
+                                : "○"}
+                            </span>
+                            <span>{activity.summary}</span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="thinking" aria-label="Preparing activity timeline"><i /><i /><i /></div>
+                    )}
                   </div>
                 </article>
               )}
@@ -793,8 +1058,8 @@ function ChatApp() {
             {modelError && <div className="model-error">{modelError}</div>}
             <textarea
               ref={inputRef}
-              aria-label="Message AI Agent"
-              placeholder="Message AI Agent..."
+              aria-label="Message AI Brain"
+              placeholder="Message AI Brain..."
               value={input}
               maxLength={8000}
               rows={1}
@@ -846,6 +1111,96 @@ function ChatApp() {
               />
               <button className="modal-primary" type="submit">Sign in</button>
             </form>
+            {session !== "guest" && (
+              <section className="memory-manager" aria-label="Personal memory">
+                <div className="memory-manager-heading">
+                  <h3>Personal memory</h3>
+                  <button type="button" className="guest-button" onClick={() => void clearMemory()}>
+                    Clear profile
+                  </button>
+                </div>
+                {memoryLoading ? (
+                  <p className="memory-message">Loading saved memories...</p>
+                ) : memoryError ? (
+                  <p className="memory-message memory-error" role="alert">{memoryError}</p>
+                ) : memoryRecords.length === 0 ? (
+                  <p className="memory-message">No confirmed personal memories.</p>
+                ) : (
+                  <div className="memory-list">
+                    {memoryRecords.map(record => (
+                      <article className="memory-record" key={record.id}>
+                        <div>
+                          <strong>{record.category}/{record.key}</strong>
+                          <span>{record.value}</span>
+                          <small>{record.source} · {record.status}</small>
+                        </div>
+                        <div className="memory-record-actions">
+                          <button
+                            type="button"
+                            aria-label={`Edit ${record.key}`}
+                            onClick={() => void editMemory(record)}
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            aria-label={`Delete ${record.key}`}
+                            onClick={() => void deleteMemory(record.id)}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
+                {memoryHistory.length > 0 && (
+                  <details className="memory-history">
+                    <summary>Correction history</summary>
+                    {memoryHistory.map(entry => (
+                      <div key={entry.id}>
+                        <strong>{entry.category}/{entry.key}</strong>
+                        <span>
+                          {entry.previous_value || "[new]"} → {entry.new_value}
+                        </span>
+                        <small>{entry.source} · {new Date(entry.created_at).toLocaleString()}</small>
+                      </div>
+                    ))}
+                  </details>
+                )}
+                <form className="memory-add" onSubmit={event => void addMemory(event)}>
+                  <select
+                    aria-label="Memory category"
+                    value={memoryDraft.category}
+                    onChange={event => setMemoryDraft(current => ({ ...current, category: event.target.value }))}
+                  >
+                    <option value="identity">Identity</option>
+                    <option value="professional">Professional</option>
+                    <option value="skills">Skills</option>
+                    <option value="preferences">Preferences</option>
+                    <option value="projects">Projects</option>
+                    <option value="interests">Interests</option>
+                    <option value="learning_goals">Learning goals</option>
+                    <option value="communication_preferences">Communication preferences</option>
+                    <option value="user_notes">User notes</option>
+                  </select>
+                  <input
+                    aria-label="Memory key"
+                    value={memoryDraft.key}
+                    maxLength={120}
+                    onChange={event => setMemoryDraft(current => ({ ...current, key: event.target.value }))}
+                  />
+                  <input
+                    aria-label="Memory value"
+                    value={memoryDraft.value}
+                    maxLength={2000}
+                    placeholder="Value"
+                    onChange={event => setMemoryDraft(current => ({ ...current, value: event.target.value }))}
+                  />
+                  <button type="submit" className="modal-primary">Add memory</button>
+                </form>
+              </section>
+            )}
             {session !== "guest" && (
               <button className="guest-button" onClick={() => void continueAsGuest()}>
                 Switch to a guest session

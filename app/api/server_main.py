@@ -4,6 +4,13 @@ from threading import Event
 from pathlib import Path
 
 from app.agents.coding_agent import CodingAgent
+from app.agents.agent_registry import AgentRegistry
+from app.agents.delegation_worker import DelegationWorker
+from app.agents.coordinator import (
+    CoordinatorAgent,
+    DelegationPermissionPolicy,
+)
+from app.agents.shared_memory import SharedMemory
 from app.api.http_server import WorkflowHTTPServer
 from app.api.security_config import read_boolean_env, validate_api_auth
 from app.api.workflow_service import WorkflowAPIService
@@ -17,6 +24,46 @@ from app.realtime.event_bus import EventBus
 from app.workflows.engine import WorkflowEngine
 from app.workflows.models import Workflow, WorkflowNode
 from app.workflows.persistence import WorkflowPersistenceStore
+from app.runtime.unified_agent_runtime import UnifiedAgentRuntime
+from app.research.providers import BraveSearchProvider, SearXNGProvider
+from app.research.search_manager import SearchManager
+
+
+class ChatDelegationAgent:
+    def __init__(self, chat_service: ChatService):
+        self.chat_service = chat_service
+
+    def chat(self, prompt: str) -> str:
+        conversation = self.chat_service.create_conversation("delegation:chat")
+        result = self.chat_service.send_message(
+            "delegation:chat",
+            conversation["id"],
+            prompt,
+            f"delegation-{conversation['id']}",
+            mode="chat",
+        )
+        return result["assistant_message"]["content"]
+
+
+class CodingDelegationAgent:
+    def __init__(self, coding_agent: CodingAgent):
+        self.coding_agent = coding_agent
+
+    def chat(self, prompt: str) -> str:
+        proposal = self.coding_agent.propose(
+            prompt,
+            [],
+            owner_id="delegation",
+            actor_id="delegation",
+        )
+        return json.dumps(
+            {
+                "proposal_id": proposal.get("id"),
+                "summary": proposal.get("proposal"),
+                "status": proposal.get("status"),
+            },
+            sort_keys=True,
+        )
 
 
 def create_demo_api(
@@ -145,12 +192,33 @@ def main() -> None:
     store.prune_api_credentials(credential_retention_days)
     store.prune_api_rate_limit_hits(rate_hit_retention_seconds)
     api, bus = create_demo_api(store)
+    agent_runtime = UnifiedAgentRuntime(provider)
+    brave_search = BraveSearchProvider(
+        os.getenv("AI_AGENT_BRAVE_SEARCH_API_KEY")
+        or os.getenv("BRAVE_SEARCH_API_KEY"),
+    )
+    searxng_search = SearXNGProvider(
+        os.getenv("SEARXNG_BASE_URL"),
+        enabled=os.getenv("SEARXNG_ENABLED", "false").lower() in ("1", "true", "yes"),
+        timeout=float(os.getenv("SEARXNG_TIMEOUT", "15")),
+        categories=os.getenv("SEARXNG_DEFAULT_CATEGORIES", "general"),
+    )
+    search_manager = SearchManager(
+        brave_search,
+        searxng_search,
+        mode=os.getenv("SEARCH_PROVIDER", "auto").lower(),
+        fallback_enabled=os.getenv("SEARCH_FALLBACK_ENABLED", "true").lower()
+        in ("1", "true", "yes"),
+    )
     chat_service = ChatService(
         store,
         provider,
         web_search_provider=BraveWebSearch(
             os.getenv("AI_AGENT_BRAVE_SEARCH_API_KEY")
         ),
+        event_bus=bus,
+        agent_runtime=agent_runtime,
+        search_manager=search_manager,
     )
     coding_workspace = os.getenv("AI_AGENT_CODING_WORKSPACE")
     coding_agent = (
@@ -165,6 +233,33 @@ def main() -> None:
         if coding_workspace
         else None
     )
+    delegation_registry = AgentRegistry()
+    delegation_registry.register(
+        "chat",
+        ChatDelegationAgent(chat_service),
+    )
+    if coding_agent is not None:
+        delegation_registry.register(
+            "coding",
+            CodingDelegationAgent(coding_agent),
+        )
+    delegation_policy = DelegationPermissionPolicy({
+        "admin": None,
+        "user": tuple(
+            name for name in ("chat", "coding")
+            if delegation_registry.get(name) is not None
+        ),
+    })
+    delegation_coordinator = CoordinatorAgent(
+        delegation_registry,
+        SharedMemory(),
+        "chat",
+    )
+    delegation_worker = DelegationWorker(
+        delegation_coordinator,
+        store,
+    )
+    delegation_worker.start()
     allowed_origins = tuple(
         origin.strip()
         for origin in os.getenv(
@@ -189,6 +284,8 @@ def main() -> None:
         ),
         require_auth=require_auth,
         allowed_origins=allowed_origins,
+        delegation_coordinator=delegation_coordinator,
+        delegation_policy=delegation_policy,
     )
     health_server = HealthServer(
         host=os.getenv("AI_AGENT_HOST", "0.0.0.0"),
@@ -215,6 +312,7 @@ def main() -> None:
     except KeyboardInterrupt:
         stopped.set()
     finally:
+        delegation_worker.stop()
         server.stop()
         health_server.stop()
         chat_service.close()

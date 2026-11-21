@@ -15,10 +15,15 @@ class ChatHandler(BaseHandler):
         provider: BaseProvider,
         memory: BaseMemory,
         rag: RAGPipeline | None = None,
+        *,
+        model: str | None = None,
+        extra_messages: list[dict[str, str]] | None = None,
     ):
         self.provider = provider
         self.memory = memory
         self.rag = rag
+        self.model = model
+        self.extra_messages = extra_messages or []
 
     def execute(
         self,
@@ -48,6 +53,20 @@ class ChatHandler(BaseHandler):
                         *messages,
                     ]
 
+        if self.extra_messages:
+            system_messages = [
+                message
+                for message in self.extra_messages
+                if message.get("role") == "system"
+            ]
+            trailing_messages = [
+                message
+                for message in self.extra_messages
+                if message.get("role") != "system"
+            ]
+            messages = [*system_messages, *messages, *trailing_messages]
+
         return self.provider.ask(
             messages,
+            model=self.model,
         )
